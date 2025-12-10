@@ -1,11 +1,14 @@
 import { html } from "hono/html";
 import type { FC } from "hono/jsx";
 
-type Props = { metricsPath: string };
+type Props = { metricsPath: string; disableConfigApi: boolean };
 
-export const LandingPageScript: FC<Props> = ({ metricsPath }) => {
+export const LandingPageScript: FC<Props> = ({ metricsPath, disableConfigApi }) => {
 	return html`
 		<script>
+			// Config API disabled flag
+			const configApiDisabled = ${String(disableConfigApi)};
+
 			// Config state management
 			let serverConfig = {};
 			let localConfig = {};
@@ -22,6 +25,7 @@ export const LandingPageScript: FC<Props> = ({ metricsPath }) => {
 
 			// Load config on page load
 			async function loadConfig() {
+				if (configApiDisabled) return;
 				try {
 					const [configRes, defaultsRes] = await Promise.all([
 						fetch('/config'),

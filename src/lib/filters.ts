@@ -56,3 +56,41 @@ export function filterZonesByIds(
 export function findZoneName(zoneId: string, zones: Zone[]): string {
 	return zones.find((z) => z.id === zoneId)?.name ?? zoneId;
 }
+
+/**
+ * Plan ID for Cloudflare Free tier.
+ * Free tier zones don't have access to GraphQL Analytics API.
+ */
+export const FREE_PLAN_ID = "0feeeeeeeeeeeeeeeeeeeeeeeeeeeeee";
+
+/**
+ * Check if zone is on Free tier.
+ *
+ * @param zone Zone to check.
+ * @returns True if zone is on Free tier.
+ */
+export function isFreeTierZone(zone: Zone): boolean {
+	return zone.plan.id === FREE_PLAN_ID;
+}
+
+/**
+ * Partition zones into paid and free tier.
+ *
+ * @param zones Array of zones to partition.
+ * @returns Object with paid and free zone arrays.
+ */
+export function partitionZonesByTier(zones: Zone[]): {
+	paid: Zone[];
+	free: Zone[];
+} {
+	const paid: Zone[] = [];
+	const free: Zone[] = [];
+	for (const zone of zones) {
+		if (isFreeTierZone(zone)) {
+			free.push(zone);
+		} else {
+			paid.push(zone);
+		}
+	}
+	return { paid, free };
+}

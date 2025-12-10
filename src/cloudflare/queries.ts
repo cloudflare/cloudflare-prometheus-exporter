@@ -102,3 +102,38 @@ export const FREE_TIER_QUERIES = [
  * Type for free tier query names.
  */
 export type FreeTierQuery = (typeof FREE_TIER_QUERIES)[number];
+
+/**
+ * Zone-level GraphQL queries that require paid tier.
+ * Free tier zones don't have access to adaptive analytics endpoints.
+ */
+export const PAID_TIER_GRAPHQL_QUERIES = [
+	"http-metrics",
+	"adaptive-metrics",
+	"edge-country-metrics",
+	"colo-metrics",
+	"colo-error-metrics",
+	"request-method-metrics",
+	"health-check-metrics",
+	"load-balancer-metrics",
+	"logpush-zone",
+	"origin-status-metrics",
+	"cache-miss-metrics",
+] as const;
+
+/**
+ * Type for paid tier GraphQL query names.
+ */
+export type PaidTierGraphQLQuery = (typeof PAID_TIER_GRAPHQL_QUERIES)[number];
+
+/**
+ * Type guard for paid tier GraphQL queries.
+ *
+ * @param query Query name to check.
+ * @returns True if query requires paid tier.
+ */
+export function isPaidTierGraphQLQuery(
+	query: string,
+): query is PaidTierGraphQLQuery {
+	return (PAID_TIER_GRAPHQL_QUERIES as readonly string[]).includes(query);
+}

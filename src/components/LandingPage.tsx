@@ -441,6 +441,7 @@ export const LandingPage: FC<Props> = ({ config }) => {
 						</p>
 					</div>
 					{/* Runtime Configuration Card */}
+					{!config.disableConfigApi && (
 					<div class="bg-white rounded-2xl border border-gray-200 shadow-sm mb-12 overflow-hidden">
 						{/* Header with Save/Reset buttons */}
 						<div class="flex items-center justify-between p-6 border-b border-gray-100">
@@ -455,8 +456,9 @@ export const LandingPage: FC<Props> = ({ config }) => {
 							<div class="flex gap-2">
 								<button
 									type="button"
+									id="reset-all-btn"
 									onclick="resetAllConfig()"
-									class="px-4 py-2 text-sm text-gray-600 hover:text-gray-900 border border-gray-300 rounded-lg hover:bg-gray-50 transition-colors"
+									class="px-4 py-2 text-sm text-gray-600 hover:text-gray-900 border border-gray-300 rounded-lg hover:bg-gray-50 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
 								>
 									Reset All
 								</button>
@@ -1121,6 +1123,7 @@ export const LandingPage: FC<Props> = ({ config }) => {
 							</div>
 						</div>
 					</div>
+					)}
 					{/* Toast notification */}
 					<div id="toast" class="toast" /> {/* Live Metrics Section */}
 					<h2 class="text-2xl font-bold text-gray-900 mb-6">Live Metrics</h2>
@@ -1184,7 +1187,7 @@ export const LandingPage: FC<Props> = ({ config }) => {
 					</div>
 				</div>
 
-				<LandingPageScript metricsPath={config.metricsPath} />
+				<LandingPageScript metricsPath={config.metricsPath} disableConfigApi={config.disableConfigApi} />
 			</body>
 		</html>
 	);

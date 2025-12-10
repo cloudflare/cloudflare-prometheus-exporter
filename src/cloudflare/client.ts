@@ -840,8 +840,21 @@ export class CloudflareMetricsClient {
 			result = await this.gql.query(HTTPMetricsQueryNoBots, queryVars);
 		}
 
+		// Safety net: free tier zones should be filtered upstream, but handle gracefully
+		if (result.error?.message.includes("does not have access to the path")) {
+			this.logger.error(
+				"Zone(s) lack GraphQL analytics access - ensure free tier zones are filtered",
+				{ error: result.error.message },
+			);
+			return [];
+		}
+
 		if (result.error) {
-			throw new Error(`GraphQL error: ${result.error.message}`);
+			throw new GraphQLError(
+				`GraphQL error: ${result.error.message}`,
+				result.error.graphQLErrors ?? [],
+				{ context: { query: "http-metrics", zone_count: zoneIds.length } },
+			);
 		}
 
 		// Initialize all metric definitions

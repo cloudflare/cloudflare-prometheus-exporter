@@ -5,7 +5,11 @@ import {
 	ZONE_LEVEL_QUERIES,
 } from "../cloudflare/client";
 import { FREE_TIER_QUERIES } from "../cloudflare/queries";
-import { filterZonesByIds, parseCommaSeparated } from "../lib/filters";
+import {
+	filterZonesByIds,
+	isFreeTierZone,
+	parseCommaSeparated,
+} from "../lib/filters";
 import { createLogger, type Logger } from "../lib/logger";
 import type { MetricDefinition } from "../lib/metrics";
 import { getConfig, type ResolvedConfig } from "../lib/runtime-config";
@@ -304,7 +308,12 @@ export class AccountMetricCoordinator extends DurableObject<Env> {
 	 */
 	async export(): Promise<{
 		metrics: MetricDefinition[];
-		zoneCounts: { total: number; filtered: number; processed: number };
+		zoneCounts: {
+			total: number;
+			filtered: number;
+			processed: number;
+			skippedFreeTier: number;
+		};
 	}> {
 		const config = await getConfig(this.env);
 		const logger = this.createLogger(config);
@@ -383,10 +392,20 @@ export class AccountMetricCoordinator extends DurableObject<Env> {
 
 		const allMetrics = [...accountMetricsResults, ...zoneMetricsResults].flat();
 
-		// Count processed zones (zones with at least one metric result)
-		const processedZones = zoneMetricsResults.filter(
-			(r) => r.length > 0,
-		).length;
+		// Count unique zones with metrics from all results
+		const zonesWithMetrics = new Set<string>();
+		for (const metric of allMetrics) {
+			for (const v of metric.values) {
+				const zone = v.labels.zone;
+				if (zone) {
+					zonesWithMetrics.add(zone);
+				}
+			}
+		}
+		const processedZones = zonesWithMetrics.size;
+
+		// Count free tier zones
+		const freeTierCount = state.zones.filter(isFreeTierZone).length;
 
 		return {
 			metrics: allMetrics,
@@ -394,6 +413,7 @@ export class AccountMetricCoordinator extends DurableObject<Env> {
 				total: state.totalZoneCount,
 				filtered: state.zones.length,
 				processed: processedZones,
+				skippedFreeTier: freeTierCount,
 			},
 		};
 	}

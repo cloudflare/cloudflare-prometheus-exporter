@@ -13,6 +13,7 @@ export type SerializeOptions = {
 /**
  * Serializes MetricDefinition array to Prometheus text exposition format.
  * Groups metrics by name, outputs HELP/TYPE headers, then values.
+ * Aggregates duplicate label combinations (sum for counters, max for gauges).
  *
  * @param metrics Array of metric definitions to serialize.
  * @param options Serialization options for filtering.
@@ -63,8 +64,11 @@ export function serializeToPrometheus(
 		// TYPE line
 		lines.push(`# TYPE ${name} ${metric.type}`);
 
+		// Aggregate values by label signature to eliminate duplicates
+		const aggregated = aggregateByLabels(metric.values, metric.type);
+
 		// Value lines
-		for (const { labels, value } of metric.values) {
+		for (const { labels, value } of aggregated) {
 			const labelStr = formatLabels(labels);
 			lines.push(`${name}${labelStr} ${formatValue(value)}`);
 		}
@@ -74,6 +78,55 @@ export function serializeToPrometheus(
 	}
 
 	return lines.join("\n");
+}
+
+/**
+ * Aggregates metric values with identical labels.
+ * Counters are summed; gauges take the maximum value.
+ *
+ * @param values Array of metric values to aggregate.
+ * @param type Metric type (counter, gauge, etc.).
+ * @returns Deduplicated array of metric values.
+ */
+function aggregateByLabels(
+	values: readonly { labels: Record<string, string>; value: number }[],
+	type: string,
+): { labels: Record<string, string>; value: number }[] {
+	const bySignature = new Map<
+		string,
+		{ labels: Record<string, string>; value: number }
+	>();
+
+	for (const { labels, value } of values) {
+		const sig = labelSignature(labels);
+		const existing = bySignature.get(sig);
+
+		if (existing) {
+			if (type === "counter") {
+				existing.value += value;
+			} else {
+				// For gauges (including percentiles), take max as upper bound
+				existing.value = Math.max(existing.value, value);
+			}
+		} else {
+			bySignature.set(sig, { labels, value });
+		}
+	}
+
+	return [...bySignature.values()];
+}
+
+/**
+ * Creates stable signature from labels for deduplication.
+ *
+ * @param labels Label key-value pairs.
+ * @returns Stable string signature for comparison.
+ */
+function labelSignature(labels: Record<string, string>): string {
+	return Object.entries(labels)
+		.sort(([a], [b]) => a.localeCompare(b))
+		.map(([k, v]) => `${k}\x00${v}`)
+		.join("\x01");
 }
 
 /**

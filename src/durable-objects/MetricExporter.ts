@@ -4,6 +4,8 @@ import {
 	isAccountLevelQuery,
 	isZoneLevelQuery,
 } from "../cloudflare/client";
+import { isPaidTierGraphQLQuery } from "../cloudflare/queries";
+import { partitionZonesByTier } from "../lib/filters";
 import { createLogger, type Logger } from "../lib/logger";
 import type { MetricDefinition, MetricValue } from "../lib/metrics";
 import { getConfig, type ResolvedConfig } from "../lib/runtime-config";
@@ -313,6 +315,7 @@ export class MetricExporter extends DurableObject<Env> {
 					client,
 					state,
 					timeRange,
+					logger,
 				);
 			} else {
 				metrics = await this.fetchZoneScopedMetrics(client, state);
@@ -365,12 +368,14 @@ export class MetricExporter extends DurableObject<Env> {
 	 * @param client Cloudflare metrics client.
 	 * @param state Current exporter state.
 	 * @param timeRange Time range for metrics queries.
+	 * @param logger Logger instance.
 	 * @returns Array of metric definitions.
 	 */
 	private async fetchAccountScopedMetrics(
 		client: ReturnType<typeof getCloudflareMetricsClient>,
 		state: MetricExporterState,
 		timeRange: TimeRange,
+		logger: Logger,
 	): Promise<MetricDefinition[]> {
 		const { queryName, accountId, accountName, zones, firewallRules } = state;
 
@@ -386,11 +391,31 @@ export class MetricExporter extends DurableObject<Env> {
 
 		// Zone-batched queries - fetch all zones in one GraphQL call
 		if (isZoneLevelQuery(queryName)) {
-			const zoneIds = zones.map((z) => z.id);
+			// Filter out free tier zones for paid-tier GraphQL queries
+			let zonesToQuery = zones;
+			if (isPaidTierGraphQLQuery(queryName)) {
+				const { paid, free } = partitionZonesByTier(zones);
+
+				if (free.length > 0) {
+					logger.info("Skipping free tier zones for paid-tier query", {
+						skipped_zones: free.map((z) => z.name),
+						processing_zones: paid.length,
+					});
+				}
+
+				zonesToQuery = paid;
+
+				if (zonesToQuery.length === 0) {
+					logger.info("No paid tier zones to query");
+					return [];
+				}
+			}
+
+			const zoneIds = zonesToQuery.map((z) => z.id);
 			return client.getZoneMetrics(
 				queryName,
 				zoneIds,
-				zones,
+				zonesToQuery,
 				firewallRules,
 				timeRange,
 			);

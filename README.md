@@ -305,6 +305,22 @@ curl -X DELETE https://your-worker.workers.dev/config
 | `cloudflare_zones_total` | gauge | - |
 | `cloudflare_zones_filtered` | gauge | - |
 | `cloudflare_zones_processed` | gauge | - |
+| `cloudflare_zones_skipped_free_tier` | gauge | - |
+
+## Free Tier Zone Limitations
+
+Zones on Cloudflare's Free plan don't have access to the GraphQL Analytics API. The exporter automatically detects and skips free tier zones for metrics that require this API.
+
+**Free tier zones still export:**
+- `cloudflare_zone_certificate_validation_status` (SSL certificates)
+- `cloudflare_zone_lb_origin_weight` (Load balancer weights, if configured)
+
+**Monitor skipped zones:**
+```
+cloudflare_zones_skipped_free_tier
+```
+
+For mixed accounts (enterprise + free zones), only free zones are skipped—paid zones continue to export all metrics.
 
 ## Architecture
 

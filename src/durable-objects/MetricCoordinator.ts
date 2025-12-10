@@ -189,20 +189,31 @@ export class MetricCoordinator extends DurableObject<Env> {
 
 					return {
 						metrics: [],
-						zoneCounts: { total: 0, filtered: 0, processed: 0 },
+						zoneCounts: {
+							total: 0,
+							filtered: 0,
+							processed: 0,
+							skippedFreeTier: 0,
+						},
 					};
 				}
 			}),
 		);
 
 		// Aggregate stats
-		const zoneCounts = { total: 0, filtered: 0, processed: 0 };
+		const zoneCounts = {
+			total: 0,
+			filtered: 0,
+			processed: 0,
+			skippedFreeTier: 0,
+		};
 		const allMetrics: MetricDefinition[] = [];
 		for (const result of results) {
 			allMetrics.push(...result.metrics);
 			zoneCounts.total += result.zoneCounts.total;
 			zoneCounts.filtered += result.zoneCounts.filtered;
 			zoneCounts.processed += result.zoneCounts.processed;
+			zoneCounts.skippedFreeTier += result.zoneCounts.skippedFreeTier;
 		}
 
 		// Add exporter info metrics
@@ -223,13 +234,18 @@ export class MetricCoordinator extends DurableObject<Env> {
 	 * Builds exporter health and discovery metrics.
 	 *
 	 * @param accountCount Number of accounts discovered.
-	 * @param zoneCounts Zone counts (total, filtered, processed).
+	 * @param zoneCounts Zone counts (total, filtered, processed, skippedFreeTier).
 	 * @param errorsByAccount Errors by account and error code.
 	 * @returns Exporter info metrics.
 	 */
 	private buildExporterInfoMetrics(
 		accountCount: number,
-		zoneCounts: { total: number; filtered: number; processed: number },
+		zoneCounts: {
+			total: number;
+			filtered: number;
+			processed: number;
+			skippedFreeTier: number;
+		},
 		errorsByAccount: Map<string, { code: string; count: number }[]>,
 	): MetricDefinition[] {
 		const metrics: MetricDefinition[] = [
@@ -262,6 +278,12 @@ export class MetricCoordinator extends DurableObject<Env> {
 				help: "Zones successfully processed",
 				type: "gauge",
 				values: [{ labels: {}, value: zoneCounts.processed }],
+			},
+			{
+				name: "cloudflare_zones_skipped_free_tier",
+				help: "Zones skipped due to free tier plan (no GraphQL analytics access)",
+				type: "gauge",
+				values: [{ labels: {}, value: zoneCounts.skippedFreeTier }],
 			},
 		];
 
