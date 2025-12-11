@@ -34,6 +34,7 @@ EXPOSE 8787
 # Wrangler expects secrets in .dev.vars file, not shell env vars
 RUN printf '#!/bin/sh\n\
     # Generate .dev.vars from environment variables\n\
+    : > .dev.vars\n\
     env | grep -E "^(CLOUDFLARE_|CF_)" | while read -r line; do\n\
     echo "$line" >> .dev.vars\n\
     done\n\
