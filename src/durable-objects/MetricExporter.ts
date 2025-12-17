@@ -497,10 +497,10 @@ export class MetricExporter extends DurableObject<Env> {
 
 	/**
 	 * Update counter state with a new raw value.
-	 * Handles counter resets by detecting decreases.
+	 * Cloudflare API returns window-based totals, so we simply add them.
 	 *
 	 * @param existing Existing counter state or undefined for new counter.
-	 * @param rawValue New raw counter value from API.
+	 * @param rawValue Window total from API to add to accumulated value.
 	 * @returns Updated counter state with accumulated value.
 	 */
 	private updateCounter(
@@ -508,13 +508,8 @@ export class MetricExporter extends DurableObject<Env> {
 		rawValue: number,
 	): CounterState {
 		if (!existing) {
-			return { prev: rawValue, accumulated: rawValue };
+			return { accumulated: rawValue };
 		}
-		const delta =
-			rawValue < existing.prev ? rawValue : rawValue - existing.prev;
-		return {
-			prev: rawValue,
-			accumulated: existing.accumulated + delta,
-		};
+		return { accumulated: existing.accumulated + rawValue };
 	}
 }

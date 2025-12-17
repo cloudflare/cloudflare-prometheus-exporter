@@ -43,11 +43,11 @@ export const MetricExporterIdSchema = z
 export type MetricExporterId = z.infer<typeof MetricExporterIdSchema>;
 
 /**
- * Zod schema for counter state tracking previous value and accumulated total.
+ * Zod schema for counter state tracking accumulated total.
+ * Cloudflare API returns window-based totals, so we just sum them.
  */
 export const CounterStateSchema = z
 	.object({
-		prev: z.number(),
 		accumulated: z.number(),
 	})
 	.readonly();
