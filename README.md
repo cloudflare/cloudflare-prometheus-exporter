@@ -66,7 +66,7 @@ Set in `wrangler.jsonc` or via `wrangler secret put`:
 
 ### Creating an API Token
 
-**Quick setup**: [Create token with pre-filled permissions](https://dash.cloudflare.com/profile/api-tokens?permissionGroupKeys=%5B%7B%22key%22%3A%22zone_analytics%22%2C%22type%22%3A%22read%22%7D%2C%7B%22key%22%3A%22account_analytics%22%2C%22type%22%3A%22read%22%7D%2C%7B%22key%22%3A%22workers_scripts%22%2C%22type%22%3A%22read%22%7D%2C%7B%22key%22%3A%22ssl_certificates%22%2C%22type%22%3A%22read%22%7D%2C%7B%22key%22%3A%22firewall_services%22%2C%22type%22%3A%22read%22%7D%2C%7B%22key%22%3A%22load_balancers%22%2C%22type%22%3A%22read%22%7D%2C%7B%22key%22%3A%22logpush%22%2C%22type%22%3A%22read%22%7D%5D&name=Cloudflare%20Prometheus%20Exporter)
+**Quick setup**: [Create token with pre-filled permissions](https://dash.cloudflare.com/profile/api-tokens?permissionGroupKeys=%5B%7B%22key%22%3A%22analytics%22%2C%22type%22%3A%22read%22%7D%2C%7B%22key%22%3A%22account_analytics%22%2C%22type%22%3A%22read%22%7D%2C%7B%22key%22%3A%22workers_scripts%22%2C%22type%22%3A%22read%22%7D%2C%7B%22key%22%3A%22ssl_and_certificates%22%2C%22type%22%3A%22read%22%7D%2C%7B%22key%22%3A%22firewall_services%22%2C%22type%22%3A%22read%22%7D%2C%7B%22key%22%3A%22load_balancers%22%2C%22type%22%3A%22read%22%7D%2C%7B%22key%22%3A%22account_logs%22%2C%22type%22%3A%22read%22%7D%2C%7B%22key%22%3A%22magic_transit%22%2C%22type%22%3A%22read%22%7D%5D&name=Cloudflare%20Prometheus%20Exporter)
 
 **Manual setup**:
 
@@ -78,7 +78,7 @@ Set in `wrangler.jsonc` or via `wrangler secret put`:
 | Zone > SSL and Certificates | Read | Optional |
 | Zone > Firewall Services | Read | Optional |
 | Zone > Load Balancers | Read | Optional |
-| Account > Logpush | Read | Optional |
+| Account > Logs | Read | Optional |
 | Account > Magic Transit | Read | Optional |
 
 ## Endpoints
