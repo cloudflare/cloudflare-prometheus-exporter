@@ -29,6 +29,43 @@ app.use("*", async (c, next) => {
 	await next();
 });
 
+// Basic auth middleware
+app.use("*", async (c, next) => {
+	const { basicAuth } = c.var.config;
+
+	if (!basicAuth.enabled) {
+		return next();
+	}
+
+	const authHeader = c.req.header("Authorization");
+
+	if (!authHeader || !authHeader.startsWith("Basic ")) {
+		return c.text("Unauthorized", 401, {
+			"WWW-Authenticate": 'Basic realm="Cloudflare Exporter"',
+		});
+	}
+
+	const base64Credentials = authHeader.slice(6);
+	let credentials: string;
+	try {
+		credentials = atob(base64Credentials);
+	} catch {
+		return c.text("Unauthorized", 401, {
+			"WWW-Authenticate": 'Basic realm="Cloudflare Exporter"',
+		});
+	}
+
+	const [username, password] = credentials.split(":");
+
+	if (username !== basicAuth.username || password !== basicAuth.password) {
+		return c.text("Unauthorized", 401, {
+			"WWW-Authenticate": 'Basic realm="Cloudflare Exporter"',
+		});
+	}
+
+	return next();
+});
+
 // Disable guards
 app.use("*", async (c, next) => {
 	const path = c.req.path;
