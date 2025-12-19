@@ -354,9 +354,15 @@ export class MetricExporter extends DurableObject<Env> {
 	 */
 	private async scheduleNextAlarm(config: ResolvedConfig): Promise<void> {
 		const intervalMs = config.metricRefreshIntervalSeconds * 1000;
-		// Jitter: 1-5s fixed (tighter clustering for time range alignment)
+
+		// Get the start of the current minute interval
+		const now = Date.now();
+		const startOfInterval = Math.floor(now / intervalMs) * intervalMs;
+
+		// Add the jitter (1-5s) to the NEXT interval start
+		// This ensures we always fire at ":01-05" of every interval
 		const jitter = 1000 + Math.random() * 4000;
-		const nextAlarm = Date.now() + intervalMs + jitter;
+		const nextAlarm = startOfInterval + intervalMs + jitter;
 
 		await this.ctx.storage.setAlarm(nextAlarm);
 	}
