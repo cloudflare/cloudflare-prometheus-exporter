@@ -256,13 +256,13 @@ export class MetricCoordinator extends DurableObject<Env> {
 				values: [{ labels: {}, value: 1 }],
 			},
 			{
-				name: "cloudflare_accounts_total",
+				name: "cloudflare_accounts",
 				help: "Total accounts discovered",
 				type: "gauge",
 				values: [{ labels: {}, value: accountCount }],
 			},
 			{
-				name: "cloudflare_zones_total",
+				name: "cloudflare_zones",
 				help: "Total zones before filtering",
 				type: "gauge",
 				values: [{ labels: {}, value: zoneCounts.total }],
