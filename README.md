@@ -21,7 +21,7 @@ Export Cloudflare metrics to Prometheus. Built on Cloudflare Workers with Durabl
 
 ### One-Click Deploy
 
-Click the deploy button above. Configure `CLOUDFLARE_API_TOKEN` as a secret after deployment.
+Click the deploy button above. Configure `CLOUDFLARE_API_TOKEN` as a secret after deployment. Configure `BASIC_AUTH_USER` and `BASIC_AUTH_PASSWORD` to protect the exporter with HTTP Basic Auth.
 
 ### Manual Deployment
 
@@ -63,6 +63,8 @@ Set in `wrangler.jsonc` or via `wrangler secret put`:
 | `CF_ZONES` | - | Comma-separated zone IDs to include (default: all) |
 | `CF_FREE_TIER_ACCOUNTS` | - | Comma-separated account IDs using free tier (skips paid-tier metrics) |
 | `METRICS_PATH` | /metrics | Custom path for metrics endpoint |
+| `BASIC_AUTH_USER` | - | Username for basic auth (secret, default: no auth, requires `BASIC_AUTH_PASSWORD`) |
+| `BASIC_AUTH_PASSWORD` | - | Password for basic auth (secret, default: no auth, requires `BASIC_AUTH_USER`) |
 
 ### Creating an API Token
 
@@ -101,6 +103,29 @@ scrape_configs:
   - job_name: 'cloudflare'
     scrape_interval: 60s
     scrape_timeout: 30s
+    static_configs:
+      - targets: ['your-worker.your-subdomain.workers.dev']
+```
+
+### With Basic Auth
+
+Set up basic auth to protect all endpoints:
+
+```bash
+wrangler secret put BASIC_AUTH_USER
+wrangler secret put BASIC_AUTH_PASSWORD
+```
+
+Then configure Prometheus:
+
+```yaml
+scrape_configs:
+  - job_name: 'cloudflare'
+    scrape_interval: 60s
+    scrape_timeout: 30s
+    basic_auth:
+      username: 'your-username'
+      password: 'your-password'
     static_configs:
       - targets: ['your-worker.your-subdomain.workers.dev']
 ```

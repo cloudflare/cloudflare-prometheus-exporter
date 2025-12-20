@@ -1,6 +1,17 @@
 import z from "zod";
 
 /**
+ * Basic auth configuration state.
+ */
+export type BasicAuthConfig =
+	| { readonly enabled: false }
+	| {
+			readonly enabled: true;
+			readonly username: string;
+			readonly password: string;
+	  };
+
+/**
  * Application configuration parsed from environment variables.
  */
 export type AppConfig = {
@@ -13,6 +24,7 @@ export type AppConfig = {
 	readonly metricsPath: string;
 	readonly disableUi: boolean;
 	readonly disableConfigApi: boolean;
+	readonly basicAuth: BasicAuthConfig;
 };
 
 /**
@@ -42,6 +54,8 @@ type OptionalEnvVars = {
 	CF_ACCOUNTS?: string;
 	CF_ZONES?: string;
 	CF_FREE_TIER_ACCOUNTS?: string;
+	BASIC_AUTH_USER?: string;
+	BASIC_AUTH_PASSWORD?: string;
 };
 
 /**
@@ -79,6 +93,11 @@ export function parseConfig(env: Env): AppConfig {
 		optionalEnv.CF_FREE_TIER_ACCOUNTS,
 	);
 
+	const basicAuth = parseBasicAuthConfig(
+		optionalEnv.BASIC_AUTH_USER,
+		optionalEnv.BASIC_AUTH_PASSWORD,
+	);
+
 	return {
 		excludeHost,
 		httpStatusGroup,
@@ -89,5 +108,40 @@ export function parseConfig(env: Env): AppConfig {
 		metricsPath,
 		disableUi,
 		disableConfigApi,
+		basicAuth,
 	};
+}
+
+/**
+ * Parses basic auth configuration from environment variables.
+ * Logs warnings if configuration is incomplete.
+ *
+ * @param user BASIC_AUTH_USER environment variable.
+ * @param password BASIC_AUTH_PASSWORD environment variable.
+ * @returns Basic auth configuration.
+ */
+function parseBasicAuthConfig(
+	user: string | undefined,
+	password: string | undefined,
+): BasicAuthConfig {
+	const hasUser = user !== undefined && user.trim() !== "";
+	const hasPassword = password !== undefined && password.trim() !== "";
+
+	if (hasUser && hasPassword) {
+		return { enabled: true, username: user.trim(), password: password.trim() };
+	}
+
+	if (hasUser && !hasPassword) {
+		console.warn(
+			"[config] BASIC_AUTH_USER is set but BASIC_AUTH_PASSWORD is missing - basic auth disabled",
+		);
+	}
+
+	if (!hasUser && hasPassword) {
+		console.warn(
+			"[config] BASIC_AUTH_PASSWORD is set but BASIC_AUTH_USER is missing - basic auth disabled",
+		);
+	}
+
+	return { enabled: false };
 }
