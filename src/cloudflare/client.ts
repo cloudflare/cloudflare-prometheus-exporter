@@ -84,10 +84,10 @@ function normalizeAccountName(name: string): string {
 
 // Worker metric names
 const WORKER_METRICS = {
-	REQUESTS: "cloudflare_worker_requests_count",
-	ERRORS: "cloudflare_worker_errors_count",
-	CPU_TIME: "cloudflare_worker_cpu_time",
-	DURATION: "cloudflare_worker_duration",
+	REQUESTS: "cloudflare_worker_requests_total",
+	ERRORS: "cloudflare_worker_errors_total",
+	CPU_TIME: "cloudflare_worker_cpu_time_seconds",
+	DURATION: "cloudflare_worker_duration_seconds",
 } as const;
 // ### API Call Summary
 //
@@ -514,13 +514,13 @@ export class CloudflareMetricsClient {
 		};
 		const cpuTimeMetric: MetricDefinition = {
 			name: WORKER_METRICS.CPU_TIME,
-			help: "Worker CPU time in microseconds",
+			help: "Worker CPU time in seconds",
 			type: "gauge",
 			values: [],
 		};
 		const durationMetric: MetricDefinition = {
 			name: WORKER_METRICS.DURATION,
-			help: "Worker execution duration in milliseconds",
+			help: "Worker execution duration in seconds",
 			type: "gauge",
 			values: [],
 		};
@@ -551,9 +551,10 @@ export class CloudflareMetricsClient {
 						{ q: "P999", val: quantiles.cpuTimeP999 },
 					]) {
 						if (val != null) {
+							// Convert microseconds to seconds
 							cpuTimeMetric.values.push({
 								labels: { ...baseLabels, quantile: q },
-								value: val,
+								value: val / 1_000_000,
 							});
 						}
 					}
@@ -564,9 +565,10 @@ export class CloudflareMetricsClient {
 						{ q: "P999", val: quantiles.durationP999 },
 					]) {
 						if (val != null) {
+							// Convert milliseconds to seconds
 							durationMetric.values.push({
 								labels: { ...baseLabels, quantile: q },
-								value: Math.round(val * 1000) / 1000,
+								value: val / 1000,
 							});
 						}
 					}
@@ -608,9 +610,9 @@ export class CloudflareMetricsClient {
 		}
 
 		const metric: MetricDefinition = {
-			name: "cloudflare_logpush_failed_jobs_account_count",
+			name: "cloudflare_logpush_failed_jobs_account_total",
 			help: "Number of failed logpush jobs at account level",
-			type: "gauge",
+			type: "counter",
 			values: [],
 		};
 
@@ -871,31 +873,31 @@ export class CloudflareMetricsClient {
 			values: [],
 		};
 		const requestsSsl: MetricDefinition = {
-			name: "cloudflare_zone_requests_ssl_encrypted",
+			name: "cloudflare_zone_requests_ssl_encrypted_total",
 			help: "SSL encrypted requests",
 			type: "counter",
 			values: [],
 		};
 		const requestsContentType: MetricDefinition = {
-			name: "cloudflare_zone_requests_content_type",
+			name: "cloudflare_zone_requests_content_type_total",
 			help: "Requests by content type",
 			type: "counter",
 			values: [],
 		};
 		const requestsCountry: MetricDefinition = {
-			name: "cloudflare_zone_requests_country",
+			name: "cloudflare_zone_requests_country_total",
 			help: "Requests by country",
 			type: "counter",
 			values: [],
 		};
 		const requestsStatus: MetricDefinition = {
-			name: "cloudflare_zone_requests_status",
+			name: "cloudflare_zone_requests_status_total",
 			help: "Requests by status code group",
 			type: "counter",
 			values: [],
 		};
 		const requestsBrowser: MetricDefinition = {
-			name: "cloudflare_zone_requests_browser_map_page_views_count",
+			name: "cloudflare_zone_requests_browser_map_page_views_total",
 			help: "Page views by browser family",
 			type: "counter",
 			values: [],
@@ -908,25 +910,25 @@ export class CloudflareMetricsClient {
 			values: [],
 		};
 		const bandwidthCached: MetricDefinition = {
-			name: "cloudflare_zone_bandwidth_cached",
+			name: "cloudflare_zone_bandwidth_cached_total",
 			help: "Cached bandwidth bytes",
 			type: "counter",
 			values: [],
 		};
 		const bandwidthSsl: MetricDefinition = {
-			name: "cloudflare_zone_bandwidth_ssl_encrypted",
+			name: "cloudflare_zone_bandwidth_ssl_encrypted_total",
 			help: "SSL encrypted bandwidth bytes",
 			type: "counter",
 			values: [],
 		};
 		const bandwidthContentType: MetricDefinition = {
-			name: "cloudflare_zone_bandwidth_content_type",
+			name: "cloudflare_zone_bandwidth_content_type_total",
 			help: "Bandwidth by content type",
 			type: "counter",
 			values: [],
 		};
 		const bandwidthCountry: MetricDefinition = {
-			name: "cloudflare_zone_bandwidth_country",
+			name: "cloudflare_zone_bandwidth_country_total",
 			help: "Bandwidth by country",
 			type: "counter",
 			values: [],
@@ -939,13 +941,13 @@ export class CloudflareMetricsClient {
 			values: [],
 		};
 		const threatsCountry: MetricDefinition = {
-			name: "cloudflare_zone_threats_country",
+			name: "cloudflare_zone_threats_country_total",
 			help: "Threats by country",
 			type: "counter",
 			values: [],
 		};
 		const threatsType: MetricDefinition = {
-			name: "cloudflare_zone_threats_type",
+			name: "cloudflare_zone_threats_type_total",
 			help: "Threats by type",
 			type: "counter",
 			values: [],
@@ -965,42 +967,42 @@ export class CloudflareMetricsClient {
 		};
 
 		const firewallEvents: MetricDefinition = {
-			name: "cloudflare_zone_firewall_events_count",
+			name: "cloudflare_zone_firewall_events_total",
 			help: "Firewall events",
 			type: "counter",
 			values: [],
 		};
 
 		const requestsIpClass: MetricDefinition = {
-			name: "cloudflare_zone_requests_ip_class",
+			name: "cloudflare_zone_requests_ip_class_total",
 			help: "Requests by IP classification",
 			type: "counter",
 			values: [],
 		};
 
 		const requestsSslProtocol: MetricDefinition = {
-			name: "cloudflare_zone_requests_ssl_protocol",
+			name: "cloudflare_zone_requests_ssl_protocol_total",
 			help: "Requests by SSL/TLS protocol version",
 			type: "counter",
 			values: [],
 		};
 
 		const requestsHttpVersion: MetricDefinition = {
-			name: "cloudflare_zone_requests_http_version",
+			name: "cloudflare_zone_requests_http_version_total",
 			help: "Requests by HTTP protocol version",
 			type: "counter",
 			values: [],
 		};
 
 		const botsDetected: MetricDefinition = {
-			name: "cloudflare_zone_firewall_bots_detected",
+			name: "cloudflare_zone_firewall_bots_detected_total",
 			help: "Bot requests detected by score bucket",
 			type: "counter",
 			values: [],
 		};
 
 		const botByCountry: MetricDefinition = {
-			name: "cloudflare_zone_bot_request_by_country",
+			name: "cloudflare_zone_bot_requests_by_country_total",
 			help: "Bot requests by country",
 			type: "counter",
 			values: [],
@@ -1277,20 +1279,20 @@ export class CloudflareMetricsClient {
 		}
 
 		const error4xx: MetricDefinition = {
-			name: "cloudflare_zone_customer_error_4xx_rate",
+			name: "cloudflare_zone_customer_error_4xx_total",
 			help: "4xx error requests",
 			type: "counter",
 			values: [],
 		};
 		const error5xx: MetricDefinition = {
-			name: "cloudflare_zone_customer_error_5xx_rate",
+			name: "cloudflare_zone_customer_error_5xx_total",
 			help: "5xx error requests",
 			type: "counter",
 			values: [],
 		};
 		const originDuration: MetricDefinition = {
-			name: "cloudflare_zone_origin_response_duration_ms",
-			help: "Origin response duration in ms",
+			name: "cloudflare_zone_origin_response_duration_seconds",
+			help: "Origin response duration in seconds",
 			type: "gauge",
 			values: [],
 		};
@@ -1335,7 +1337,8 @@ export class CloudflareMetricsClient {
 
 				const avgDuration = group.avg?.originResponseDurationMs;
 				if (avgDuration != null) {
-					originDuration.values.push({ labels, value: avgDuration });
+					// Convert milliseconds to seconds
+					originDuration.values.push({ labels, value: avgDuration / 1000 });
 				}
 			}
 		}
@@ -1382,7 +1385,7 @@ export class CloudflareMetricsClient {
 		}
 
 		const statusCountryHost: MetricDefinition = {
-			name: "cloudflare_zone_requests_status_country_host",
+			name: "cloudflare_zone_requests_status_country_host_total",
 			help: "Edge status by country and host",
 			type: "counter",
 			values: [],
@@ -1470,13 +1473,13 @@ export class CloudflareMetricsClient {
 		}
 
 		const visits: MetricDefinition = {
-			name: "cloudflare_zone_colocation_visits",
+			name: "cloudflare_zone_colocation_visits_total",
 			help: "Visits per colo",
 			type: "counter",
 			values: [],
 		};
 		const responseBytes: MetricDefinition = {
-			name: "cloudflare_zone_colocation_edge_response_bytes",
+			name: "cloudflare_zone_colocation_edge_response_bytes_total",
 			help: "Edge response bytes per colo",
 			type: "counter",
 			values: [],
@@ -1546,19 +1549,19 @@ export class CloudflareMetricsClient {
 		}
 
 		const visitsError: MetricDefinition = {
-			name: "cloudflare_zone_colocation_visits_error",
+			name: "cloudflare_zone_colocation_error_visits_total",
 			help: "Error visits per colo",
 			type: "counter",
 			values: [],
 		};
 		const responseBytesError: MetricDefinition = {
-			name: "cloudflare_zone_colocation_edge_response_bytes_error",
+			name: "cloudflare_zone_colocation_error_edge_response_bytes_total",
 			help: "Error response bytes per colo",
 			type: "counter",
 			values: [],
 		};
 		const requestsError: MetricDefinition = {
-			name: "cloudflare_zone_colocation_requests_total_error",
+			name: "cloudflare_zone_colocation_error_requests_total",
 			help: "Error requests per colo",
 			type: "counter",
 			values: [],
@@ -1623,7 +1626,7 @@ export class CloudflareMetricsClient {
 		}
 
 		const methodCount: MetricDefinition = {
-			name: "cloudflare_zone_request_method_count",
+			name: "cloudflare_zone_requests_by_method_total",
 			help: "Requests by HTTP method",
 			type: "counter",
 			values: [],
@@ -1678,7 +1681,7 @@ export class CloudflareMetricsClient {
 		}
 
 		const eventsOrigin: MetricDefinition = {
-			name: "cloudflare_zone_health_check_events_origin_count",
+			name: "cloudflare_zone_health_check_events_origin_total",
 			help: "Health check events per origin",
 			type: "counter",
 			values: [],
@@ -1690,26 +1693,26 @@ export class CloudflareMetricsClient {
 			values: [],
 		};
 		const healthCheckRtt: MetricDefinition = {
-			name: "cloudflare_zone_health_check_rtt_ms",
-			help: "Health check RTT to origin in milliseconds",
+			name: "cloudflare_zone_health_check_rtt_seconds",
+			help: "Health check RTT to origin in seconds",
 			type: "gauge",
 			values: [],
 		};
 		const healthCheckTtfb: MetricDefinition = {
-			name: "cloudflare_zone_health_check_ttfb_ms",
-			help: "Health check time to first byte in milliseconds",
+			name: "cloudflare_zone_health_check_ttfb_seconds",
+			help: "Health check time to first byte in seconds",
 			type: "gauge",
 			values: [],
 		};
 		const healthCheckTcpConn: MetricDefinition = {
-			name: "cloudflare_zone_health_check_tcp_conn_ms",
-			help: "Health check TCP connection time in milliseconds",
+			name: "cloudflare_zone_health_check_tcp_connection_seconds",
+			help: "Health check TCP connection time in seconds",
 			type: "gauge",
 			values: [],
 		};
 		const healthCheckTlsHandshake: MetricDefinition = {
-			name: "cloudflare_zone_health_check_tls_handshake_ms",
-			help: "Health check TLS handshake time in milliseconds",
+			name: "cloudflare_zone_health_check_tls_handshake_seconds",
+			help: "Health check TLS handshake time in seconds",
 			type: "gauge",
 			values: [],
 		};
@@ -1746,27 +1749,31 @@ export class CloudflareMetricsClient {
 					};
 
 					if (avg?.rttMs != null) {
+						// Convert milliseconds to seconds
 						healthCheckRtt.values.push({
 							labels: baseLabels,
-							value: avg.rttMs,
+							value: avg.rttMs / 1000,
 						});
 					}
 					if (avg?.timeToFirstByteMs != null) {
+						// Convert milliseconds to seconds
 						healthCheckTtfb.values.push({
 							labels: baseLabels,
-							value: avg.timeToFirstByteMs,
+							value: avg.timeToFirstByteMs / 1000,
 						});
 					}
 					if (avg?.tcpConnMs != null) {
+						// Convert milliseconds to seconds
 						healthCheckTcpConn.values.push({
 							labels: baseLabels,
-							value: avg.tcpConnMs,
+							value: avg.tcpConnMs / 1000,
 						});
 					}
 					if (avg?.tlsHandshakeMs != null) {
+						// Convert milliseconds to seconds
 						healthCheckTlsHandshake.values.push({
 							labels: baseLabels,
-							value: avg.tlsHandshakeMs,
+							value: avg.tlsHandshakeMs / 1000,
 						});
 					}
 				}
@@ -1832,8 +1839,8 @@ export class CloudflareMetricsClient {
 			values: [],
 		};
 		const poolRtt: MetricDefinition = {
-			name: "cloudflare_zone_lb_pool_rtt_ms",
-			help: "Load balancer pool RTT in milliseconds",
+			name: "cloudflare_zone_lb_pool_rtt_seconds",
+			help: "Load balancer pool RTT in seconds",
 			type: "gauge",
 			values: [],
 		};
@@ -1870,7 +1877,7 @@ export class CloudflareMetricsClient {
 						value: group.count,
 					});
 
-					// Pool RTT
+					// Pool RTT - convert milliseconds to seconds
 					if (
 						dim?.selectedPoolAvgRttMs != null &&
 						dim.selectedPoolAvgRttMs > 0
@@ -1881,7 +1888,7 @@ export class CloudflareMetricsClient {
 								lb_name: dim?.lbName ?? "",
 								pool_name: dim?.selectedPoolName ?? "",
 							},
-							value: dim.selectedPoolAvgRttMs,
+							value: dim.selectedPoolAvgRttMs / 1000,
 						});
 					}
 
@@ -1963,7 +1970,7 @@ export class CloudflareMetricsClient {
 		}
 
 		const failedJobs: MetricDefinition = {
-			name: "cloudflare_logpush_failed_jobs_zone_count",
+			name: "cloudflare_logpush_failed_jobs_zone_total",
 			help: "Failed logpush jobs per zone",
 			type: "counter",
 			values: [],
@@ -2016,7 +2023,7 @@ export class CloudflareMetricsClient {
 		}
 
 		const originStatusCountryHost: MetricDefinition = {
-			name: "cloudflare_zone_requests_origin_status_country_host",
+			name: "cloudflare_zone_requests_origin_status_country_host_total",
 			help: "Requests by origin status, country, and host",
 			type: "counter",
 			values: [],
@@ -2077,8 +2084,8 @@ export class CloudflareMetricsClient {
 		}
 
 		const cacheMissDuration: MetricDefinition = {
-			name: "cloudflare_zone_cache_miss_origin_duration_ms",
-			help: "Average origin response duration on cache miss in milliseconds",
+			name: "cloudflare_zone_cache_miss_origin_duration_seconds",
+			help: "Average origin response duration on cache miss in seconds",
 			type: "gauge",
 			values: [],
 		};
@@ -2091,13 +2098,14 @@ export class CloudflareMetricsClient {
 				const avgDuration = group.avg?.originResponseDurationMs;
 
 				if (avgDuration != null && group.count != null && group.count > 0) {
+					// Convert milliseconds to seconds
 					cacheMissDuration.values.push({
 						labels: {
 							zone: zoneName,
 							country: dim?.clientCountryName ?? "",
 							host: dim?.clientRequestHTTPHost ?? "",
 						},
-						value: avgDuration,
+						value: avgDuration / 1000,
 					});
 				}
 			}
