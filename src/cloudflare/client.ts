@@ -528,9 +528,11 @@ export class CloudflareMetricsClient {
 		for (const accountData of result.data?.viewer?.accounts ?? []) {
 			for (const worker of accountData.workersInvocationsAdaptive ?? []) {
 				const scriptName = worker.dimensions?.scriptName ?? "unknown";
+				const status = worker.dimensions?.status ?? "unknown";
 				const baseLabels = {
 					script_name: scriptName,
 					account: normalizedAccount,
+					status: status,
 				};
 
 				requestsMetric.values.push({
