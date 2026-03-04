@@ -34,6 +34,7 @@ import {
 	LogpushAccountMetricsQuery,
 	LogpushZoneMetricsQuery,
 	MagicTransitMetricsQuery,
+	NetworkAnalyticsQuery,
 	OriginStatusMetricsQuery,
 	RequestMethodMetricsQuery,
 	WorkerTotalsQuery,
@@ -468,6 +469,12 @@ export class CloudflareMetricsClient {
 					normalizedAccount,
 					timeRange,
 				);
+			case "network-analytics":
+				return this.getNetworkAnalyticsMetrics(
+					accountId,
+					normalizedAccount,
+					timeRange,
+				);
 			default: {
 				const _exhaustive: never = query;
 				throw new Error(`Unknown account metric query: ${_exhaustive}`);
@@ -744,6 +751,169 @@ export class CloudflareMetricsClient {
 			tunnelFailures,
 			edgeColoCount,
 		].filter((m) => m.values.length > 0);
+	}
+
+	/**
+	 * Network analytics metrics across 6 NAv2 datasets:
+	 * Magic Transit, Magic Firewall, DDoS (dosd), IDPS,
+	 * Advanced TCP Protection, Advanced DNS Protection.
+	 *
+	 * Each dataset produces bits_total + packets_total counters
+	 * with low-cardinality labels (outcome, direction, ip_protocol).
+	 *
+	 * @param accountId Cloudflare account ID.
+	 * @param normalizedAccount Normalized account name for labels.
+	 * @param timeRange Query time range.
+	 * @returns Network analytics metrics across all datasets.
+	 */
+	private async getNetworkAnalyticsMetrics(
+		accountId: string,
+		normalizedAccount: string,
+		timeRange: { mintime: string; maxtime: string },
+	): Promise<MetricDefinition[]> {
+		const result = await this.gql.query(NetworkAnalyticsQuery, {
+			accountID: accountId,
+			mintime: timeRange.mintime,
+			maxtime: timeRange.maxtime,
+			limit: this.config.queryLimit,
+		});
+
+		if (result.error) {
+			this.logger.error("GraphQL error (network-analytics)", {
+				error: result.error.message,
+			});
+			return [];
+		}
+
+		const metrics: MetricDefinition[] = [];
+
+		for (const accountData of result.data?.viewer?.accounts ?? []) {
+			// -- Magic Transit --
+			this.collectNetworkAnalyticsDataset(
+				accountData.magicTransitNetworkAnalyticsAdaptiveGroups ?? [],
+				"magic_transit",
+				"Magic Transit",
+				normalizedAccount,
+				metrics,
+				(dims) => ({
+					mitigation_system: dims.mitigationSystem ?? "",
+				}),
+			);
+
+			// -- Magic Firewall --
+			this.collectNetworkAnalyticsDataset(
+				accountData.magicFirewallNetworkAnalyticsAdaptiveGroups ?? [],
+				"magic_firewall",
+				"Magic Firewall",
+				normalizedAccount,
+				metrics,
+			);
+
+			// -- DDoS Defense (dosd) --
+			this.collectNetworkAnalyticsDataset(
+				accountData.dosdNetworkAnalyticsAdaptiveGroups ?? [],
+				"dosd",
+				"DDoS defense",
+				normalizedAccount,
+				metrics,
+				(dims) => ({
+					attack_vector: dims.attackVector ?? "",
+				}),
+			);
+
+			// -- IDPS --
+			this.collectNetworkAnalyticsDataset(
+				accountData.magicIDPSNetworkAnalyticsAdaptiveGroups ?? [],
+				"idps",
+				"Intrusion detection",
+				normalizedAccount,
+				metrics,
+			);
+
+			// -- Advanced TCP Protection --
+			this.collectNetworkAnalyticsDataset(
+				accountData.advancedTcpProtectionNetworkAnalyticsAdaptiveGroups ?? [],
+				"tcp_protection",
+				"Advanced TCP protection",
+				normalizedAccount,
+				metrics,
+			);
+
+			// -- Advanced DNS Protection --
+			this.collectNetworkAnalyticsDataset(
+				accountData.advancedDnsProtectionNetworkAnalyticsAdaptiveGroups ?? [],
+				"dns_protection",
+				"Advanced DNS protection",
+				normalizedAccount,
+				metrics,
+			);
+		}
+
+		return metrics.filter((m) => m.values.length > 0);
+	}
+
+	/**
+	 * Collects bits/packets counter metrics from a network analytics dataset.
+	 * Shared extraction logic for all NAv2 datasets.
+	 *
+	 * @param groups GraphQL response groups for the dataset.
+	 * @param slug Metric name slug (e.g. "magic_transit", "dosd").
+	 * @param helpPrefix Human-readable prefix for HELP text.
+	 * @param normalizedAccount Account label value.
+	 * @param metrics Output array to push MetricDefinitions into.
+	 * @param extraLabels Optional function to extract dataset-specific labels.
+	 */
+	private collectNetworkAnalyticsDataset<
+		T extends {
+			sum?: { bits: number; packets: number } | null;
+			dimensions?: {
+				outcome: string;
+				direction: string;
+				ipProtocolName: string;
+			} | null;
+		},
+	>(
+		groups: readonly T[],
+		slug: string,
+		helpPrefix: string,
+		normalizedAccount: string,
+		metrics: MetricDefinition[],
+		extraLabels?: (
+			dims: NonNullable<T["dimensions"]>,
+		) => Record<string, string>,
+	): void {
+		if (groups.length === 0) return;
+
+		const bits: MetricDefinition = {
+			name: `cloudflare_network_analytics_${slug}_bits_total`,
+			help: `${helpPrefix} bits received`,
+			type: "counter",
+			values: [],
+		};
+		const packets: MetricDefinition = {
+			name: `cloudflare_network_analytics_${slug}_packets_total`,
+			help: `${helpPrefix} packets received`,
+			type: "counter",
+			values: [],
+		};
+
+		for (const group of groups) {
+			const dims = group.dimensions;
+			if (dims == null) continue;
+
+			const labels: Record<string, string> = {
+				account: normalizedAccount,
+				outcome: dims.outcome ?? "",
+				direction: dims.direction ?? "",
+				ip_protocol: dims.ipProtocolName ?? "",
+				...extraLabels?.(dims as NonNullable<T["dimensions"]>),
+			};
+
+			bits.values.push({ labels, value: group.sum?.bits ?? 0 });
+			packets.values.push({ labels, value: group.sum?.packets ?? 0 });
+		}
+
+		metrics.push(bits, packets);
 	}
 
 	/**

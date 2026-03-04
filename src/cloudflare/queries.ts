@@ -9,6 +9,7 @@ export const MetricQueryNameSchema = z.enum([
 	"worker-totals",
 	"logpush-account",
 	"magic-transit",
+	"network-analytics",
 	// Zone-level
 	"http-metrics",
 	"adaptive-metrics",
@@ -39,6 +40,7 @@ export const ACCOUNT_LEVEL_QUERIES = [
 	"worker-totals",
 	"logpush-account",
 	"magic-transit",
+	"network-analytics",
 ] as const;
 
 /**
@@ -98,6 +100,7 @@ export const FREE_TIER_QUERIES = [
 	"worker-totals",
 	"logpush-account",
 	"magic-transit",
+	"network-analytics",
 ] as const;
 
 /**

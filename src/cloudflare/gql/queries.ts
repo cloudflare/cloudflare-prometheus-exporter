@@ -716,3 +716,108 @@ export const CacheMissMetricsQuery = graphql(`
     }
   }
 `);
+
+/**
+ * Combined network analytics query across all 6 NAv2 datasets.
+ * Returns bits/packets totals with low-cardinality dimensions.
+ * Datasets that don't apply to an account return empty arrays.
+ */
+export const NetworkAnalyticsQuery = graphql(`
+  query NetworkAnalytics(
+    $accountID: string!
+    $limit: uint64!
+    $mintime: Time!
+    $maxtime: Time!
+  ) {
+    viewer {
+      accounts(filter: { accountTag: $accountID }) {
+        magicTransitNetworkAnalyticsAdaptiveGroups(
+          limit: $limit
+          filter: { datetime_geq: $mintime, datetime_lt: $maxtime }
+        ) {
+          sum {
+            bits
+            packets
+          }
+          dimensions {
+            outcome
+            direction
+            ipProtocolName
+            mitigationSystem
+          }
+        }
+        magicFirewallNetworkAnalyticsAdaptiveGroups(
+          limit: $limit
+          filter: { datetime_geq: $mintime, datetime_lt: $maxtime }
+        ) {
+          sum {
+            bits
+            packets
+          }
+          dimensions {
+            outcome
+            direction
+            ipProtocolName
+          }
+        }
+        dosdNetworkAnalyticsAdaptiveGroups(
+          limit: $limit
+          filter: { datetime_geq: $mintime, datetime_lt: $maxtime }
+        ) {
+          sum {
+            bits
+            packets
+          }
+          dimensions {
+            outcome
+            direction
+            ipProtocolName
+            attackVector
+          }
+        }
+        magicIDPSNetworkAnalyticsAdaptiveGroups(
+          limit: $limit
+          filter: { datetime_geq: $mintime, datetime_lt: $maxtime }
+        ) {
+          sum {
+            bits
+            packets
+          }
+          dimensions {
+            outcome
+            direction
+            ipProtocolName
+          }
+        }
+        advancedTcpProtectionNetworkAnalyticsAdaptiveGroups(
+          limit: $limit
+          filter: { datetime_geq: $mintime, datetime_lt: $maxtime }
+        ) {
+          sum {
+            bits
+            packets
+          }
+          dimensions {
+            outcome
+            direction
+            ipProtocolName
+          }
+        }
+        advancedDnsProtectionNetworkAnalyticsAdaptiveGroups(
+          limit: $limit
+          filter: { datetime_geq: $mintime, datetime_lt: $maxtime }
+        ) {
+          sum {
+            bits
+            packets
+          }
+          dimensions {
+            outcome
+            direction
+            ipProtocolName
+          }
+        }
+      }
+    }
+  }
+`);
