@@ -8,7 +8,7 @@ Export Cloudflare metrics to Prometheus. Built on Cloudflare Workers with Durabl
 
 ## Features
 
-- **80+ Prometheus metrics** - requests, bandwidth, threats, workers, load balancers, SSL certs, hostname-level analytics, network analytics, Magic Transit tunnel health, and more
+- **90+ Prometheus metrics** - requests, bandwidth, threats, workers, load balancers, SSL certs, hostname-level analytics, network analytics, Magic Transit tunnel health/traffic/SLO, Magic Firewall per-rule visibility, and more
 - **Cloudflare Workers** - serverless edge deployment
 - **Durable Objects** - stateful counter accumulation for proper Prometheus semantics
 - **Background refresh** - alarms fetch data every 60s; scrapes return cached data instantly
@@ -309,6 +309,8 @@ curl -X DELETE https://your-worker.workers.dev/config
 
 ### Magic Transit Metrics
 
+**Tunnel Health** (from `magic-transit` query)
+
 | Metric | Type | Labels |
 |--------|------|--------|
 | `cloudflare_magic_transit_active_tunnels` | gauge | account, tunnel_name, site_name |
@@ -316,9 +318,37 @@ curl -X DELETE https://your-worker.workers.dev/config
 | `cloudflare_magic_transit_tunnel_failures` | gauge | account, tunnel_name, site_name |
 | `cloudflare_magic_transit_edge_colo_count` | gauge | account, tunnel_name, site_name |
 | `cloudflare_magic_transit_tunnel_failure_by_status` | gauge | account, tunnel_name, site_name, result_status |
+| `cloudflare_magic_transit_tunnel_state` | gauge | account, tunnel_name, site_name |
+
+> `tunnel_state`: Combined state from Cloudflare health checks -- 0 = down, 0.5 = degraded, 1 = healthy.
+
+**Tunnel SLO** (from `magic-transit-slo` query)
+
+| Metric | Type | Labels |
+|--------|------|--------|
 | `cloudflare_magic_transit_tunnel_slo_status` | gauge | account, tunnel_name, site_name, status |
 | `cloudflare_magic_transit_tunnel_effective_slo` | gauge | account, tunnel_name, site_name |
 | `cloudflare_magic_transit_tunnel_target_slo` | gauge | account, tunnel_name, site_name |
+
+**Tunnel Traffic** (from `magic-transit-traffic` query)
+
+Per-tunnel bandwidth and packet counters with ramp method visibility.
+
+| Metric | Type | Labels |
+|--------|------|--------|
+| `cloudflare_magic_transit_tunnel_traffic_bits_total` | counter | account, tunnel_name, direction, on_ramp, off_ramp |
+| `cloudflare_magic_transit_tunnel_traffic_packets_total` | counter | account, tunnel_name, direction, on_ramp, off_ramp |
+
+### Magic Firewall Metrics
+
+**Per-Rule Sampled Traffic** (from `magic-firewall-samples` query)
+
+Traffic allowed and blocked by specific Magic Firewall rules.
+
+| Metric | Type | Labels |
+|--------|------|--------|
+| `cloudflare_magic_firewall_rule_bits_total` | counter | account, rule_id |
+| `cloudflare_magic_firewall_rule_packets_total` | counter | account, rule_id |
 
 ### Network Analytics Metrics
 
@@ -328,22 +358,22 @@ Traffic volume metrics across Cloudflare's Network Analytics v2 datasets. All ar
 
 | Metric | Type | Labels |
 |--------|------|--------|
-| `cloudflare_network_analytics_magic_transit_bits_total` | counter | account, outcome, direction, ip_protocol, mitigation_system |
-| `cloudflare_network_analytics_magic_transit_packets_total` | counter | account, outcome, direction, ip_protocol, mitigation_system |
+| `cloudflare_network_analytics_magic_transit_bits_total` | counter | account, outcome, direction, ip_protocol, mitigation_system, ingress_tunnel, egress_tunnel, on_ramp, off_ramp |
+| `cloudflare_network_analytics_magic_transit_packets_total` | counter | account, outcome, direction, ip_protocol, mitigation_system, ingress_tunnel, egress_tunnel, on_ramp, off_ramp |
 
 **Magic Firewall**
 
 | Metric | Type | Labels |
 |--------|------|--------|
-| `cloudflare_network_analytics_magic_firewall_bits_total` | counter | account, outcome, direction, ip_protocol |
-| `cloudflare_network_analytics_magic_firewall_packets_total` | counter | account, outcome, direction, ip_protocol |
+| `cloudflare_network_analytics_magic_firewall_bits_total` | counter | account, outcome, direction, ip_protocol, rule_id, ruleset_id, verdict |
+| `cloudflare_network_analytics_magic_firewall_packets_total` | counter | account, outcome, direction, ip_protocol, rule_id, ruleset_id, verdict |
 
 **DDoS Defense (dosd)**
 
 | Metric | Type | Labels |
 |--------|------|--------|
-| `cloudflare_network_analytics_dosd_bits_total` | counter | account, outcome, direction, ip_protocol, attack_vector |
-| `cloudflare_network_analytics_dosd_packets_total` | counter | account, outcome, direction, ip_protocol, attack_vector |
+| `cloudflare_network_analytics_dosd_bits_total` | counter | account, outcome, direction, ip_protocol, attack_vector, mitigation_reason, mitigation_scope |
+| `cloudflare_network_analytics_dosd_packets_total` | counter | account, outcome, direction, ip_protocol, attack_vector, mitigation_reason, mitigation_scope |
 
 **Intrusion Detection (IDPS)**
 
@@ -356,15 +386,15 @@ Traffic volume metrics across Cloudflare's Network Analytics v2 datasets. All ar
 
 | Metric | Type | Labels |
 |--------|------|--------|
-| `cloudflare_network_analytics_tcp_protection_bits_total` | counter | account, outcome, direction, ip_protocol |
-| `cloudflare_network_analytics_tcp_protection_packets_total` | counter | account, outcome, direction, ip_protocol |
+| `cloudflare_network_analytics_tcp_protection_bits_total` | counter | account, outcome, direction, ip_protocol, mitigation_reason, mitigation_scope, protocol_state |
+| `cloudflare_network_analytics_tcp_protection_packets_total` | counter | account, outcome, direction, ip_protocol, mitigation_reason, mitigation_scope, protocol_state |
 
 **Advanced DNS Protection**
 
 | Metric | Type | Labels |
 |--------|------|--------|
-| `cloudflare_network_analytics_dns_protection_bits_total` | counter | account, outcome, direction, ip_protocol |
-| `cloudflare_network_analytics_dns_protection_packets_total` | counter | account, outcome, direction, ip_protocol |
+| `cloudflare_network_analytics_dns_protection_bits_total` | counter | account, outcome, direction, ip_protocol, dns_query_type |
+| `cloudflare_network_analytics_dns_protection_packets_total` | counter | account, outcome, direction, ip_protocol, dns_query_type |
 
 ### Hostname Metrics
 
@@ -462,13 +492,14 @@ For mixed accounts (enterprise + free zones), only free zones are skipped—paid
 │   ▼            ▼      ▼            ▼      ▼            ▼                       │
 │ ┌─────┐    ┌─────┐  ┌─────┐    ┌─────┐  ┌─────┐    ┌─────┐                     │
 │ │Exprt│    │Exprt│  │Exprt│    │Exprt│  │Exprt│    │Exprt│                     │
-│ │(17) │ .. │(N)  │  │(17) │ .. │(N)  │  │(17) │ .. │(N)  │                     │
+│ │(19) │ .. │(N)  │  │(19) │ .. │(N)  │  │(19) │ .. │(N)  │                     │
 │ │acct │    │zone │  │acct │    │zone │  │acct │    │zone │                     │
 │ └─────┘    └─────┘  └─────┘    └─────┘  └─────┘    └─────┘                     │
 │                                                                                │
 │  MetricExporter DOs (per account):                                             │
-│  - Account-scoped (17): worker-totals, logpush-account, magic-transit,         │
-│    magic-transit-slo, network-analytics, http-metrics, adaptive-metrics,       │
+│  - Account-scoped (19): worker-totals, logpush-account, magic-transit,         │
+│    magic-transit-slo, magic-transit-traffic, magic-firewall-samples,           │
+│    network-analytics, http-metrics, adaptive-metrics,                          │
 │    edge-country-metrics,                                                       │
 │    colo-metrics, colo-error-metrics, request-method-metrics,                   │
 │    health-check-metrics, load-balancer-metrics, logpush-zone,                  │

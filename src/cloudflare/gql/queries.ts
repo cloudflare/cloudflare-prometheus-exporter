@@ -536,6 +536,9 @@ export const MagicTransitMetricsQuery = graphql(`
           filter: { datetime_geq: $mintime, datetime_lt: $maxtime }
         ) {
           count
+          avg {
+            tunnelState
+          }
           dimensions {
             active
             datetime
@@ -578,6 +581,61 @@ export const MagicTransitSLOMetricsQuery = graphql(`
 						tunnelName
 						siteName
 						status
+					}
+				}
+			}
+		}
+	}
+`);
+
+export const MagicTransitTunnelTrafficQuery = graphql(`
+	query MagicTransitTunnelTraffic(
+		$accountID: string!
+		$limit: uint64!
+		$mintime: Time!
+		$maxtime: Time!
+	) {
+		viewer {
+			accounts(filter: { accountTag: $accountID }) {
+				magicTransitTunnelTrafficAdaptiveGroups(
+					limit: $limit
+					filter: { datetime_geq: $mintime, datetime_lt: $maxtime }
+				) {
+					sum {
+						bits
+						packets
+					}
+					dimensions {
+						tunnelName
+						direction
+						onRamp
+						offRamp
+					}
+				}
+			}
+		}
+	}
+`);
+
+export const MagicFirewallSamplesQuery = graphql(`
+	query MagicFirewallSamples(
+		$accountID: string!
+		$limit: uint64!
+		$mintime: Time!
+		$maxtime: Time!
+	) {
+		viewer {
+			accounts(filter: { accountTag: $accountID }) {
+				magicFirewallSamplesAdaptiveGroups(
+					limit: $limit
+					filter: { datetime_geq: $mintime, datetime_lt: $maxtime }
+				) {
+					sum {
+						bits
+						packets
+					}
+					dimensions {
+						ruleId
 					}
 				}
 			}
@@ -773,6 +831,10 @@ export const NetworkAnalyticsQuery = graphql(`
             direction
             ipProtocolName
             mitigationSystem
+            ingressTunnelName
+            egressTunnelName
+            onRamp
+            offRamp
           }
         }
         magicFirewallNetworkAnalyticsAdaptiveGroups(
@@ -787,6 +849,9 @@ export const NetworkAnalyticsQuery = graphql(`
             outcome
             direction
             ipProtocolName
+            ruleId
+            rulesetId
+            verdict
           }
         }
         dosdNetworkAnalyticsAdaptiveGroups(
@@ -802,6 +867,8 @@ export const NetworkAnalyticsQuery = graphql(`
             direction
             ipProtocolName
             attackVector
+            mitigationReason
+            mitigationScope
           }
         }
         magicIDPSNetworkAnalyticsAdaptiveGroups(
@@ -830,6 +897,9 @@ export const NetworkAnalyticsQuery = graphql(`
             outcome
             direction
             ipProtocolName
+            mitigationReason
+            mitigationScope
+            protocolState
           }
         }
         advancedDnsProtectionNetworkAnalyticsAdaptiveGroups(
@@ -844,6 +914,7 @@ export const NetworkAnalyticsQuery = graphql(`
             outcome
             direction
             ipProtocolName
+            dnsQueryType
           }
         }
       }

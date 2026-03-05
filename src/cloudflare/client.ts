@@ -33,8 +33,10 @@ import {
 	LoadBalancerMetricsQuery,
 	LogpushAccountMetricsQuery,
 	LogpushZoneMetricsQuery,
+	MagicFirewallSamplesQuery,
 	MagicTransitMetricsQuery,
 	MagicTransitSLOMetricsQuery,
+	MagicTransitTunnelTrafficQuery,
 	NetworkAnalyticsQuery,
 	OriginStatusMetricsQuery,
 	RequestMethodMetricsQuery,
@@ -476,6 +478,18 @@ export class CloudflareMetricsClient {
 					normalizedAccount,
 					timeRange,
 				);
+			case "magic-transit-traffic":
+				return this.getMagicTransitTunnelTrafficMetrics(
+					accountId,
+					normalizedAccount,
+					timeRange,
+				);
+			case "magic-firewall-samples":
+				return this.getMagicFirewallSamplesMetrics(
+					accountId,
+					normalizedAccount,
+					timeRange,
+				);
 			case "network-analytics":
 				return this.getNetworkAnalyticsMetrics(
 					accountId,
@@ -703,6 +717,12 @@ export class CloudflareMetricsClient {
 			type: "gauge",
 			values: [],
 		};
+		const tunnelState: MetricDefinition = {
+			name: "cloudflare_magic_transit_tunnel_state",
+			help: "Magic Transit combined tunnel state (0=down, 0.5=degraded, 1=healthy)",
+			type: "gauge",
+			values: [],
+		};
 
 		for (const accountData of result.data?.viewer?.accounts ?? []) {
 			const groups =
@@ -771,6 +791,25 @@ export class CloudflareMetricsClient {
 				);
 				if (colos.size > 0)
 					edgeColoCount.values.push({ labels, value: colos.size });
+
+				// Tunnel state: weighted average of avg.tunnelState
+				// 0 = down, 0.5 = degraded, 1 = healthy
+				let stateWeight = 0;
+				let weightedState = 0;
+				for (const g of tunnelGroups) {
+					const weight = g.count ?? 0;
+					const state = g.avg?.tunnelState;
+					if (weight > 0 && state != null) {
+						stateWeight += weight;
+						weightedState += state * weight;
+					}
+				}
+				if (stateWeight > 0) {
+					tunnelState.values.push({
+						labels,
+						value: weightedState / stateWeight,
+					});
+				}
 			}
 		}
 
@@ -780,6 +819,7 @@ export class CloudflareMetricsClient {
 			tunnelFailures,
 			edgeColoCount,
 			failureByStatus,
+			tunnelState,
 		].filter((m) => m.values.length > 0);
 	}
 
@@ -907,6 +947,133 @@ export class CloudflareMetricsClient {
 	}
 
 	/**
+	 * Magic Transit tunnel bandwidth metrics (bits/packets per tunnel).
+	 *
+	 * Uses magicTransitTunnelTrafficAdaptiveGroups for per-tunnel throughput
+	 * with direction, on-ramp, and off-ramp breakdowns.
+	 *
+	 * @param accountId Cloudflare account ID.
+	 * @param normalizedAccount Normalized account name for labels.
+	 * @param timeRange Query time range.
+	 * @returns Magic Transit tunnel traffic metrics.
+	 */
+	private async getMagicTransitTunnelTrafficMetrics(
+		accountId: string,
+		normalizedAccount: string,
+		timeRange: { mintime: string; maxtime: string },
+	): Promise<MetricDefinition[]> {
+		const result = await this.gql.query(MagicTransitTunnelTrafficQuery, {
+			accountID: accountId,
+			mintime: timeRange.mintime,
+			maxtime: timeRange.maxtime,
+			limit: this.config.queryLimit,
+		});
+
+		if (result.error) {
+			this.logger.error("GraphQL error (magic-transit-traffic)", {
+				error: result.error.message,
+			});
+			return [];
+		}
+
+		const bits: MetricDefinition = {
+			name: "cloudflare_magic_transit_tunnel_traffic_bits_total",
+			help: "Magic Transit tunnel bandwidth in bits",
+			type: "counter",
+			values: [],
+		};
+		const packets: MetricDefinition = {
+			name: "cloudflare_magic_transit_tunnel_traffic_packets_total",
+			help: "Magic Transit tunnel packets",
+			type: "counter",
+			values: [],
+		};
+
+		for (const accountData of result.data?.viewer?.accounts ?? []) {
+			for (const group of accountData.magicTransitTunnelTrafficAdaptiveGroups ??
+				[]) {
+				const dims = group.dimensions;
+				if (dims == null) continue;
+
+				const labels: Record<string, string> = {
+					account: normalizedAccount,
+					tunnel_name: dims.tunnelName ?? "",
+					direction: dims.direction ?? "",
+					on_ramp: dims.onRamp ?? "",
+					off_ramp: dims.offRamp ?? "",
+				};
+
+				bits.values.push({ labels, value: group.sum?.bits ?? 0 });
+				packets.values.push({ labels, value: group.sum?.packets ?? 0 });
+			}
+		}
+
+		return [bits, packets].filter((m) => m.values.length > 0);
+	}
+
+	/**
+	 * Magic Firewall per-rule sampled traffic metrics.
+	 *
+	 * Uses magicFirewallSamplesAdaptiveGroups to show bits/packets
+	 * allowed and blocked by specific Magic Firewall rules.
+	 *
+	 * @param accountId Cloudflare account ID.
+	 * @param normalizedAccount Normalized account name for labels.
+	 * @param timeRange Query time range.
+	 * @returns Magic Firewall per-rule metrics.
+	 */
+	private async getMagicFirewallSamplesMetrics(
+		accountId: string,
+		normalizedAccount: string,
+		timeRange: { mintime: string; maxtime: string },
+	): Promise<MetricDefinition[]> {
+		const result = await this.gql.query(MagicFirewallSamplesQuery, {
+			accountID: accountId,
+			mintime: timeRange.mintime,
+			maxtime: timeRange.maxtime,
+			limit: this.config.queryLimit,
+		});
+
+		if (result.error) {
+			this.logger.error("GraphQL error (magic-firewall-samples)", {
+				error: result.error.message,
+			});
+			return [];
+		}
+
+		const bits: MetricDefinition = {
+			name: "cloudflare_magic_firewall_rule_bits_total",
+			help: "Magic Firewall sampled traffic bits per rule",
+			type: "counter",
+			values: [],
+		};
+		const packets: MetricDefinition = {
+			name: "cloudflare_magic_firewall_rule_packets_total",
+			help: "Magic Firewall sampled traffic packets per rule",
+			type: "counter",
+			values: [],
+		};
+
+		for (const accountData of result.data?.viewer?.accounts ?? []) {
+			for (const group of accountData.magicFirewallSamplesAdaptiveGroups ??
+				[]) {
+				const dims = group.dimensions;
+				if (dims == null) continue;
+
+				const labels: Record<string, string> = {
+					account: normalizedAccount,
+					rule_id: dims.ruleId ?? "",
+				};
+
+				bits.values.push({ labels, value: group.sum?.bits ?? 0 });
+				packets.values.push({ labels, value: group.sum?.packets ?? 0 });
+			}
+		}
+
+		return [bits, packets].filter((m) => m.values.length > 0);
+	}
+
+	/**
 	 * Network analytics metrics across 6 NAv2 datasets:
 	 * Magic Transit, Magic Firewall, DDoS (dosd), IDPS,
 	 * Advanced TCP Protection, Advanced DNS Protection.
@@ -950,6 +1117,10 @@ export class CloudflareMetricsClient {
 				metrics,
 				(dims) => ({
 					mitigation_system: dims.mitigationSystem ?? "",
+					ingress_tunnel: dims.ingressTunnelName ?? "",
+					egress_tunnel: dims.egressTunnelName ?? "",
+					on_ramp: dims.onRamp ?? "",
+					off_ramp: dims.offRamp ?? "",
 				}),
 			);
 
@@ -960,6 +1131,11 @@ export class CloudflareMetricsClient {
 				"Magic Firewall",
 				normalizedAccount,
 				metrics,
+				(dims) => ({
+					rule_id: dims.ruleId ?? "",
+					ruleset_id: dims.rulesetId ?? "",
+					verdict: dims.verdict ?? "",
+				}),
 			);
 
 			// -- DDoS Defense (dosd) --
@@ -971,6 +1147,8 @@ export class CloudflareMetricsClient {
 				metrics,
 				(dims) => ({
 					attack_vector: dims.attackVector ?? "",
+					mitigation_reason: dims.mitigationReason ?? "",
+					mitigation_scope: dims.mitigationScope ?? "",
 				}),
 			);
 
@@ -990,6 +1168,11 @@ export class CloudflareMetricsClient {
 				"Advanced TCP protection",
 				normalizedAccount,
 				metrics,
+				(dims) => ({
+					mitigation_reason: dims.mitigationReason ?? "",
+					mitigation_scope: dims.mitigationScope ?? "",
+					protocol_state: dims.protocolState ?? "",
+				}),
 			);
 
 			// -- Advanced DNS Protection --
@@ -999,6 +1182,9 @@ export class CloudflareMetricsClient {
 				"Advanced DNS protection",
 				normalizedAccount,
 				metrics,
+				(dims) => ({
+					dns_query_type: dims.dnsQueryType ?? "",
+				}),
 			);
 		}
 
