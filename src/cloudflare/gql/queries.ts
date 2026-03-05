@@ -556,6 +556,35 @@ export const MagicTransitMetricsQuery = graphql(`
 // Note: Cloudflare's accounts filter only supports single accountTag, not accountTag_in
 // Use MagicTransitMetricsQuery for individual account queries
 
+export const MagicTransitSLOMetricsQuery = graphql(`
+	query MagicTransitSLOMetrics(
+		$accountID: string!
+		$limit: uint64!
+		$mintime: Time!
+		$maxtime: Time!
+	) {
+		viewer {
+			accounts(filter: { accountTag: $accountID }) {
+				magicTransitTunnelHealthCheckSLOsAdaptiveGroups(
+					limit: $limit
+					filter: { datetime_geq: $mintime, datetime_lt: $maxtime }
+				) {
+					count
+					avg {
+						effectiveSlo
+						slo
+					}
+					dimensions {
+						tunnelName
+						siteName
+						status
+					}
+				}
+			}
+		}
+	}
+`);
+
 export const RequestMethodMetricsQuery = graphql(`
   query RequestMethodMetrics(
     $zoneIDs: [string!]

@@ -34,6 +34,7 @@ import {
 	LogpushAccountMetricsQuery,
 	LogpushZoneMetricsQuery,
 	MagicTransitMetricsQuery,
+	MagicTransitSLOMetricsQuery,
 	NetworkAnalyticsQuery,
 	OriginStatusMetricsQuery,
 	RequestMethodMetricsQuery,
@@ -469,6 +470,12 @@ export class CloudflareMetricsClient {
 					normalizedAccount,
 					timeRange,
 				);
+			case "magic-transit-slo":
+				return this.getMagicTransitSLOMetricsInternal(
+					accountId,
+					normalizedAccount,
+					timeRange,
+				);
 			case "network-analytics":
 				return this.getNetworkAnalyticsMetrics(
 					accountId,
@@ -690,6 +697,12 @@ export class CloudflareMetricsClient {
 			type: "gauge",
 			values: [],
 		};
+		const failureByStatus: MetricDefinition = {
+			name: "cloudflare_magic_transit_tunnel_failure_by_status",
+			help: "Magic Transit tunnel health check failures broken down by result status",
+			type: "gauge",
+			values: [],
+		};
 
 		for (const accountData of result.data?.viewer?.accounts ?? []) {
 			const groups =
@@ -734,6 +747,22 @@ export class CloudflareMetricsClient {
 				if (failures > 0)
 					tunnelFailures.values.push({ labels, value: failures });
 
+				// Failures by status: group non-healthy results by resultStatus
+				const byStatus = new Map<string, number>();
+				for (const g of tunnelGroups) {
+					const status = g.dimensions?.resultStatus ?? "";
+					if (status === "healthy" || status === "") continue;
+					byStatus.set(status, (byStatus.get(status) ?? 0) + (g.count ?? 0));
+				}
+				for (const [status, count] of byStatus) {
+					if (count > 0) {
+						failureByStatus.values.push({
+							labels: { ...labels, result_status: status },
+							value: count,
+						});
+					}
+				}
+
 				// Edge colo count: distinct colos
 				const colos = new Set(
 					tunnelGroups
@@ -750,7 +779,131 @@ export class CloudflareMetricsClient {
 			healthyTunnels,
 			tunnelFailures,
 			edgeColoCount,
+			failureByStatus,
 		].filter((m) => m.values.length > 0);
+	}
+
+	/**
+	 * Magic Transit tunnel health check SLO metrics (status, effective SLO, target SLO).
+	 *
+	 * Uses the magicTransitTunnelHealthCheckSLOsAdaptiveGroups dataset which provides
+	 * authoritative tunnel health status based on SLO calculations.
+	 *
+	 * @param accountId Cloudflare account ID.
+	 * @param normalizedAccount Normalized account name for labels.
+	 * @param timeRange Query time range.
+	 * @returns Magic Transit SLO metrics.
+	 */
+	private async getMagicTransitSLOMetricsInternal(
+		accountId: string,
+		normalizedAccount: string,
+		timeRange: { mintime: string; maxtime: string },
+	): Promise<MetricDefinition[]> {
+		const result = await this.gql.query(MagicTransitSLOMetricsQuery, {
+			accountID: accountId,
+			mintime: timeRange.mintime,
+			maxtime: timeRange.maxtime,
+			limit: this.config.queryLimit,
+		});
+
+		if (result.error) {
+			this.logger.error("GraphQL error (magic-transit-slo)", {
+				error: result.error.message,
+			});
+			return [];
+		}
+
+		const sloStatus: MetricDefinition = {
+			name: "cloudflare_magic_transit_tunnel_slo_status",
+			help: "Magic Transit tunnel health check SLO status count per tunnel and status",
+			type: "gauge",
+			values: [],
+		};
+		const effectiveSlo: MetricDefinition = {
+			name: "cloudflare_magic_transit_tunnel_effective_slo",
+			help: "Magic Transit tunnel effective SLO (0.0-1.0 availability ratio)",
+			type: "gauge",
+			values: [],
+		};
+		const targetSlo: MetricDefinition = {
+			name: "cloudflare_magic_transit_tunnel_target_slo",
+			help: "Magic Transit tunnel configured target SLO threshold",
+			type: "gauge",
+			values: [],
+		};
+
+		for (const accountData of result.data?.viewer?.accounts ?? []) {
+			const groups =
+				accountData.magicTransitTunnelHealthCheckSLOsAdaptiveGroups ?? [];
+
+			// Group by tunnel for aggregation
+			const byTunnel = new Map<string, (typeof groups)[number][]>();
+			for (const g of groups) {
+				const dims = g.dimensions;
+				if (dims == null) continue;
+				const key = `${dims.tunnelName ?? ""}:${dims.siteName ?? ""}`;
+				const existing = byTunnel.get(key);
+				if (existing) {
+					existing.push(g);
+				} else {
+					byTunnel.set(key, [g]);
+				}
+			}
+
+			for (const [key, tunnelGroups] of byTunnel) {
+				const [tunnelName, siteName] = key.split(":");
+				const baseLabels = {
+					account: normalizedAccount,
+					tunnel_name: tunnelName ?? "",
+					site_name: siteName ?? "",
+				};
+
+				// SLO status: count per {tunnel, status} combination
+				const byStatus = new Map<string, number>();
+				for (const g of tunnelGroups) {
+					const dims = g.dimensions;
+					if (dims == null) continue;
+					const status = dims.status ?? "";
+					if (status === "") continue;
+					byStatus.set(status, (byStatus.get(status) ?? 0) + (g.count ?? 0));
+				}
+				for (const [status, count] of byStatus) {
+					if (count > 0) {
+						sloStatus.values.push({
+							labels: { ...baseLabels, status },
+							value: count,
+						});
+					}
+				}
+
+				// Effective SLO: weighted average across groups for the tunnel
+				let totalWeight = 0;
+				let weightedEffective = 0;
+				let weightedTarget = 0;
+				for (const g of tunnelGroups) {
+					const weight = g.count ?? 0;
+					if (weight === 0) continue;
+					totalWeight += weight;
+					weightedEffective += (g.avg?.effectiveSlo ?? 0) * weight;
+					weightedTarget += (g.avg?.slo ?? 0) * weight;
+				}
+
+				if (totalWeight > 0) {
+					effectiveSlo.values.push({
+						labels: baseLabels,
+						value: weightedEffective / totalWeight,
+					});
+					targetSlo.values.push({
+						labels: baseLabels,
+						value: weightedTarget / totalWeight,
+					});
+				}
+			}
+		}
+
+		return [sloStatus, effectiveSlo, targetSlo].filter(
+			(m) => m.values.length > 0,
+		);
 	}
 
 	/**

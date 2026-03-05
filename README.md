@@ -8,7 +8,7 @@ Export Cloudflare metrics to Prometheus. Built on Cloudflare Workers with Durabl
 
 ## Features
 
-- **80+ Prometheus metrics** - requests, bandwidth, threats, workers, load balancers, SSL certs, hostname-level analytics, network analytics, and more
+- **80+ Prometheus metrics** - requests, bandwidth, threats, workers, load balancers, SSL certs, hostname-level analytics, network analytics, Magic Transit tunnel health, and more
 - **Cloudflare Workers** - serverless edge deployment
 - **Durable Objects** - stateful counter accumulation for proper Prometheus semantics
 - **Background refresh** - alarms fetch data every 60s; scrapes return cached data instantly
@@ -311,10 +311,14 @@ curl -X DELETE https://your-worker.workers.dev/config
 
 | Metric | Type | Labels |
 |--------|------|--------|
-| `cloudflare_magic_transit_active_tunnels` | gauge | account |
-| `cloudflare_magic_transit_healthy_tunnels` | gauge | account |
-| `cloudflare_magic_transit_tunnel_failures` | gauge | account |
-| `cloudflare_magic_transit_edge_colo_count` | gauge | account |
+| `cloudflare_magic_transit_active_tunnels` | gauge | account, tunnel_name, site_name |
+| `cloudflare_magic_transit_healthy_tunnels` | gauge | account, tunnel_name, site_name |
+| `cloudflare_magic_transit_tunnel_failures` | gauge | account, tunnel_name, site_name |
+| `cloudflare_magic_transit_edge_colo_count` | gauge | account, tunnel_name, site_name |
+| `cloudflare_magic_transit_tunnel_failure_by_status` | gauge | account, tunnel_name, site_name, result_status |
+| `cloudflare_magic_transit_tunnel_slo_status` | gauge | account, tunnel_name, site_name, status |
+| `cloudflare_magic_transit_tunnel_effective_slo` | gauge | account, tunnel_name, site_name |
+| `cloudflare_magic_transit_tunnel_target_slo` | gauge | account, tunnel_name, site_name |
 
 ### Network Analytics Metrics
 
@@ -458,13 +462,14 @@ For mixed accounts (enterprise + free zones), only free zones are skipped—paid
 │   ▼            ▼      ▼            ▼      ▼            ▼                       │
 │ ┌─────┐    ┌─────┐  ┌─────┐    ┌─────┐  ┌─────┐    ┌─────┐                     │
 │ │Exprt│    │Exprt│  │Exprt│    │Exprt│  │Exprt│    │Exprt│                     │
-│ │(16) │ .. │(N)  │  │(16) │ .. │(N)  │  │(16) │ .. │(N)  │                     │
+│ │(17) │ .. │(N)  │  │(17) │ .. │(N)  │  │(17) │ .. │(N)  │                     │
 │ │acct │    │zone │  │acct │    │zone │  │acct │    │zone │                     │
 │ └─────┘    └─────┘  └─────┘    └─────┘  └─────┘    └─────┘                     │
 │                                                                                │
 │  MetricExporter DOs (per account):                                             │
-│  - Account-scoped (16): worker-totals, logpush-account, magic-transit,         │
-│    network-analytics, http-metrics, adaptive-metrics, edge-country-metrics,    │
+│  - Account-scoped (17): worker-totals, logpush-account, magic-transit,         │
+│    magic-transit-slo, network-analytics, http-metrics, adaptive-metrics,       │
+│    edge-country-metrics,                                                       │
 │    colo-metrics, colo-error-metrics, request-method-metrics,                   │
 │    health-check-metrics, load-balancer-metrics, logpush-zone,                  │
 │    origin-status-metrics, cache-miss-metrics, hostname-http-metrics            │
@@ -593,11 +598,12 @@ For mixed accounts (enterprise + free zones), only free zones are skipped—paid
 ┌────────────────────────────────────────────────────────────────────────┐
 │           MetricExporter.refresh() for account-scoped queries          │
 │                                                                        │
-│  Query Types (16 total):                                               │
-│  ├── ACCOUNT-LEVEL (single account per query, 4):                      │
+│  Query Types (17 total):                                               │
+│  ��── ACCOUNT-LEVEL (single account per query, 5):                      │
 │  │   ├── worker-totals                                                 │
 │  │   ├── logpush-account                                               │
 │  │   ├── magic-transit                                                 │
+│  │   ├── magic-transit-slo                                             │
 │  │   └── network-analytics                                             │
 │  │                                                                     │
 │  └── ZONE-LEVEL (all zones batched in one query, 12):                  │
