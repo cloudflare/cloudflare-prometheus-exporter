@@ -78,6 +78,29 @@ function groupStatusCode(code: number): string {
 }
 
 /**
+ * Cloudflare tunnel health state encoding:
+ *   0 = down, 0.5 = degraded, 1 = healthy
+ *
+ * Thresholds are midpoints between adjacent states, used to classify
+ * a weighted-average health score into a discrete state.
+ */
+const TUNNEL_HEALTHY_THRESHOLD = 0.75;
+const TUNNEL_DEGRADED_THRESHOLD = 0.25;
+
+/** Classify a weighted-average tunnel health score into a discrete StateSet. */
+function classifyTunnelState(avgScore: number): {
+	healthy: 0 | 1;
+	degraded: 0 | 1;
+	down: 0 | 1;
+} {
+	if (avgScore >= TUNNEL_HEALTHY_THRESHOLD)
+		return { healthy: 1, degraded: 0, down: 0 };
+	if (avgScore >= TUNNEL_DEGRADED_THRESHOLD)
+		return { healthy: 0, degraded: 1, down: 0 };
+	return { healthy: 0, degraded: 0, down: 1 };
+}
+
+/**
  * Normalizes account name for use in Prometheus labels.
  *
  * @param name Account name.
@@ -717,9 +740,21 @@ export class CloudflareMetricsClient {
 			type: "gauge",
 			values: [],
 		};
-		const tunnelState: MetricDefinition = {
-			name: "cloudflare_magic_transit_tunnel_state",
-			help: "Magic Transit combined tunnel state (0=down, 0.5=degraded, 1=healthy)",
+		const tunnelStateHealthy: MetricDefinition = {
+			name: "cloudflare_magic_transit_tunnel_state_healthy",
+			help: "Magic Transit tunnel is in healthy state (1=yes, 0=no)",
+			type: "gauge",
+			values: [],
+		};
+		const tunnelStateDegraded: MetricDefinition = {
+			name: "cloudflare_magic_transit_tunnel_state_degraded",
+			help: "Magic Transit tunnel is in degraded state (1=yes, 0=no)",
+			type: "gauge",
+			values: [],
+		};
+		const tunnelStateDown: MetricDefinition = {
+			name: "cloudflare_magic_transit_tunnel_state_down",
+			help: "Magic Transit tunnel is in down state (1=yes, 0=no)",
 			type: "gauge",
 			values: [],
 		};
@@ -792,8 +827,9 @@ export class CloudflareMetricsClient {
 				if (colos.size > 0)
 					edgeColoCount.values.push({ labels, value: colos.size });
 
-				// Tunnel state: weighted average of avg.tunnelState
-				// 0 = down, 0.5 = degraded, 1 = healthy
+				// Tunnel state: weighted average of avg.tunnelState across colos,
+				// then thresholded into a StateSet-style triple of boolean gauges.
+				// CF encodes: 0 = down, 0.5 = degraded, 1 = healthy.
 				let stateWeight = 0;
 				let weightedState = 0;
 				for (const g of tunnelGroups) {
@@ -805,10 +841,13 @@ export class CloudflareMetricsClient {
 					}
 				}
 				if (stateWeight > 0) {
-					tunnelState.values.push({
+					const state = classifyTunnelState(weightedState / stateWeight);
+					tunnelStateHealthy.values.push({ labels, value: state.healthy });
+					tunnelStateDegraded.values.push({
 						labels,
-						value: weightedState / stateWeight,
+						value: state.degraded,
 					});
+					tunnelStateDown.values.push({ labels, value: state.down });
 				}
 			}
 		}
@@ -819,7 +858,9 @@ export class CloudflareMetricsClient {
 			tunnelFailures,
 			edgeColoCount,
 			failureByStatus,
-			tunnelState,
+			tunnelStateHealthy,
+			tunnelStateDegraded,
+			tunnelStateDown,
 		].filter((m) => m.values.length > 0);
 	}
 
@@ -1117,10 +1158,6 @@ export class CloudflareMetricsClient {
 				metrics,
 				(dims) => ({
 					mitigation_system: dims.mitigationSystem ?? "",
-					ingress_tunnel: dims.ingressTunnelName ?? "",
-					egress_tunnel: dims.egressTunnelName ?? "",
-					on_ramp: dims.onRamp ?? "",
-					off_ramp: dims.offRamp ?? "",
 				}),
 			);
 
@@ -1131,11 +1168,6 @@ export class CloudflareMetricsClient {
 				"Magic Firewall",
 				normalizedAccount,
 				metrics,
-				(dims) => ({
-					rule_id: dims.ruleId ?? "",
-					ruleset_id: dims.rulesetId ?? "",
-					verdict: dims.verdict ?? "",
-				}),
 			);
 
 			// -- DDoS Defense (dosd) --
@@ -1147,8 +1179,6 @@ export class CloudflareMetricsClient {
 				metrics,
 				(dims) => ({
 					attack_vector: dims.attackVector ?? "",
-					mitigation_reason: dims.mitigationReason ?? "",
-					mitigation_scope: dims.mitigationScope ?? "",
 				}),
 			);
 
@@ -1168,11 +1198,6 @@ export class CloudflareMetricsClient {
 				"Advanced TCP protection",
 				normalizedAccount,
 				metrics,
-				(dims) => ({
-					mitigation_reason: dims.mitigationReason ?? "",
-					mitigation_scope: dims.mitigationScope ?? "",
-					protocol_state: dims.protocolState ?? "",
-				}),
 			);
 
 			// -- Advanced DNS Protection --
@@ -1182,9 +1207,6 @@ export class CloudflareMetricsClient {
 				"Advanced DNS protection",
 				normalizedAccount,
 				metrics,
-				(dims) => ({
-					dns_query_type: dims.dnsQueryType ?? "",
-				}),
 			);
 		}
 

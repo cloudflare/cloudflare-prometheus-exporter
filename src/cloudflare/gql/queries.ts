@@ -831,10 +831,6 @@ export const NetworkAnalyticsQuery = graphql(`
             direction
             ipProtocolName
             mitigationSystem
-            ingressTunnelName
-            egressTunnelName
-            onRamp
-            offRamp
           }
         }
         magicFirewallNetworkAnalyticsAdaptiveGroups(
@@ -849,9 +845,6 @@ export const NetworkAnalyticsQuery = graphql(`
             outcome
             direction
             ipProtocolName
-            ruleId
-            rulesetId
-            verdict
           }
         }
         dosdNetworkAnalyticsAdaptiveGroups(
@@ -867,8 +860,6 @@ export const NetworkAnalyticsQuery = graphql(`
             direction
             ipProtocolName
             attackVector
-            mitigationReason
-            mitigationScope
           }
         }
         magicIDPSNetworkAnalyticsAdaptiveGroups(
@@ -897,9 +888,6 @@ export const NetworkAnalyticsQuery = graphql(`
             outcome
             direction
             ipProtocolName
-            mitigationReason
-            mitigationScope
-            protocolState
           }
         }
         advancedDnsProtectionNetworkAnalyticsAdaptiveGroups(
@@ -914,7 +902,6 @@ export const NetworkAnalyticsQuery = graphql(`
             outcome
             direction
             ipProtocolName
-            dnsQueryType
           }
         }
       }
