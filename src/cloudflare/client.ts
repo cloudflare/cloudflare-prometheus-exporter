@@ -763,91 +763,102 @@ export class CloudflareMetricsClient {
 			const groups =
 				accountData.magicTransitTunnelHealthChecksAdaptiveGroups ?? [];
 
-			// Group by tunnel for aggregation
-			const byTunnel = new Map<string, (typeof groups)[number][]>();
+			// Group by (tunnelName, siteName) for aggregation
+			const byTunnel = new Map<
+				string,
+				Map<string, (typeof groups)[number][]>
+			>();
 			for (const g of groups) {
-				const key = `${g.dimensions?.tunnelName ?? ""}:${g.dimensions?.siteName ?? ""}`;
-				const existing = byTunnel.get(key);
+				const tName = g.dimensions?.tunnelName ?? "";
+				const sName = g.dimensions?.siteName ?? "";
+				let bySite = byTunnel.get(tName);
+				if (!bySite) {
+					bySite = new Map();
+					byTunnel.set(tName, bySite);
+				}
+				const existing = bySite.get(sName);
 				if (existing) {
 					existing.push(g);
 				} else {
-					byTunnel.set(key, [g]);
+					bySite.set(sName, [g]);
 				}
 			}
 
-			for (const [key, tunnelGroups] of byTunnel) {
-				const [tunnelName, siteName] = key.split(":");
-				const labels = {
-					account: normalizedAccount,
-					tunnel_name: tunnelName ?? "",
-					site_name: siteName ?? "",
-				};
+			for (const [tunnelName, bySite] of byTunnel) {
+				for (const [siteName, tunnelGroups] of bySite) {
+					const labels = {
+						account: normalizedAccount,
+						tunnel_name: tunnelName,
+						site_name: siteName,
+					};
 
-				// Active: count where active=true
-				const active = tunnelGroups
-					.filter((g) => String(g.dimensions?.active) === "true")
-					.reduce((sum, g) => sum + (g.count ?? 0), 0);
-				if (active > 0) activeTunnels.values.push({ labels, value: active });
+					// Active: count where active=1 (uint8 boolean in CF schema)
+					const active = tunnelGroups
+						.filter((g) => (g.dimensions?.active ?? 0) === 1)
+						.reduce((sum, g) => sum + (g.count ?? 0), 0);
+					if (active > 0) activeTunnels.values.push({ labels, value: active });
 
-				// Healthy: resultStatus === "healthy"
-				const healthy = tunnelGroups
-					.filter((g) => g.dimensions?.resultStatus === "healthy")
-					.reduce((sum, g) => sum + (g.count ?? 0), 0);
-				if (healthy > 0) healthyTunnels.values.push({ labels, value: healthy });
+					// Healthy: resultStatus === "healthy"
+					const healthy = tunnelGroups
+						.filter((g) => g.dimensions?.resultStatus === "healthy")
+						.reduce((sum, g) => sum + (g.count ?? 0), 0);
+					if (healthy > 0)
+						healthyTunnels.values.push({ labels, value: healthy });
 
-				// Failures: resultStatus !== "healthy"
-				const failures = tunnelGroups
-					.filter((g) => g.dimensions?.resultStatus !== "healthy")
-					.reduce((sum, g) => sum + (g.count ?? 0), 0);
-				if (failures > 0)
-					tunnelFailures.values.push({ labels, value: failures });
+					// Failures: resultStatus !== "healthy"
+					const failures = tunnelGroups
+						.filter((g) => g.dimensions?.resultStatus !== "healthy")
+						.reduce((sum, g) => sum + (g.count ?? 0), 0);
+					if (failures > 0)
+						tunnelFailures.values.push({ labels, value: failures });
 
-				// Failures by status: group non-healthy results by resultStatus
-				const byStatus = new Map<string, number>();
-				for (const g of tunnelGroups) {
-					const status = g.dimensions?.resultStatus ?? "";
-					if (status === "healthy" || status === "") continue;
-					byStatus.set(status, (byStatus.get(status) ?? 0) + (g.count ?? 0));
-				}
-				for (const [status, count] of byStatus) {
-					if (count > 0) {
-						failureByStatus.values.push({
-							labels: { ...labels, result_status: status },
-							value: count,
+					// Failures by status: group non-healthy results by resultStatus
+					const byStatus = new Map<string, number>();
+					for (const g of tunnelGroups) {
+						const status = g.dimensions?.resultStatus ?? "";
+						if (status === "healthy" || status === "") continue;
+						byStatus.set(status, (byStatus.get(status) ?? 0) + (g.count ?? 0));
+					}
+					for (const [status, count] of byStatus) {
+						if (count > 0) {
+							failureByStatus.values.push({
+								labels: { ...labels, result_status: status },
+								value: count,
+							});
+						}
+					}
+
+					// Edge colo count: distinct colos
+					const colos = new Set(
+						tunnelGroups
+							.map((g) => g.dimensions?.edgeColoCity)
+							.filter((c): c is string => c != null && c !== ""),
+					);
+					if (colos.size > 0)
+						edgeColoCount.values.push({ labels, value: colos.size });
+
+					// Tunnel state: weighted average of avg.tunnelState across colos,
+					// then thresholded into a StateSet-style triple of boolean gauges.
+					// CF encodes: 0 = down, 0.5 = degraded, 1 = healthy.
+					let stateWeight = 0;
+					let weightedState = 0;
+					for (const g of tunnelGroups) {
+						const weight = g.count ?? 0;
+						const state = g.avg?.tunnelState;
+						if (weight > 0 && state != null) {
+							stateWeight += weight;
+							weightedState += state * weight;
+						}
+					}
+					if (stateWeight > 0) {
+						const state = classifyTunnelState(weightedState / stateWeight);
+						tunnelStateHealthy.values.push({ labels, value: state.healthy });
+						tunnelStateDegraded.values.push({
+							labels,
+							value: state.degraded,
 						});
+						tunnelStateDown.values.push({ labels, value: state.down });
 					}
-				}
-
-				// Edge colo count: distinct colos
-				const colos = new Set(
-					tunnelGroups
-						.map((g) => g.dimensions?.edgeColoCity)
-						.filter((c): c is string => c != null && c !== ""),
-				);
-				if (colos.size > 0)
-					edgeColoCount.values.push({ labels, value: colos.size });
-
-				// Tunnel state: weighted average of avg.tunnelState across colos,
-				// then thresholded into a StateSet-style triple of boolean gauges.
-				// CF encodes: 0 = down, 0.5 = degraded, 1 = healthy.
-				let stateWeight = 0;
-				let weightedState = 0;
-				for (const g of tunnelGroups) {
-					const weight = g.count ?? 0;
-					const state = g.avg?.tunnelState;
-					if (weight > 0 && state != null) {
-						stateWeight += weight;
-						weightedState += state * weight;
-					}
-				}
-				if (stateWeight > 0) {
-					const state = classifyTunnelState(weightedState / stateWeight);
-					tunnelStateHealthy.values.push({ labels, value: state.healthy });
-					tunnelStateDegraded.values.push({
-						labels,
-						value: state.degraded,
-					});
-					tunnelStateDown.values.push({ labels, value: state.down });
 				}
 			}
 		}
@@ -917,67 +928,77 @@ export class CloudflareMetricsClient {
 			const groups =
 				accountData.magicTransitTunnelHealthCheckSLOsAdaptiveGroups ?? [];
 
-			// Group by tunnel for aggregation
-			const byTunnel = new Map<string, (typeof groups)[number][]>();
+			// Group by (tunnelName, siteName) for aggregation
+			const byTunnel = new Map<
+				string,
+				Map<string, (typeof groups)[number][]>
+			>();
 			for (const g of groups) {
 				const dims = g.dimensions;
 				if (dims == null) continue;
-				const key = `${dims.tunnelName ?? ""}:${dims.siteName ?? ""}`;
-				const existing = byTunnel.get(key);
+				const tName = dims.tunnelName ?? "";
+				const sName = dims.siteName ?? "";
+				let bySite = byTunnel.get(tName);
+				if (!bySite) {
+					bySite = new Map();
+					byTunnel.set(tName, bySite);
+				}
+				const existing = bySite.get(sName);
 				if (existing) {
 					existing.push(g);
 				} else {
-					byTunnel.set(key, [g]);
+					bySite.set(sName, [g]);
 				}
 			}
 
-			for (const [key, tunnelGroups] of byTunnel) {
-				const [tunnelName, siteName] = key.split(":");
-				const baseLabels = {
-					account: normalizedAccount,
-					tunnel_name: tunnelName ?? "",
-					site_name: siteName ?? "",
-				};
+			for (const [tunnelName, bySite] of byTunnel) {
+				for (const [siteName, tunnelGroups] of bySite) {
+					const baseLabels = {
+						account: normalizedAccount,
+						tunnel_name: tunnelName,
+						site_name: siteName,
+					};
 
-				// SLO status: count per {tunnel, status} combination
-				const byStatus = new Map<string, number>();
-				for (const g of tunnelGroups) {
-					const dims = g.dimensions;
-					if (dims == null) continue;
-					const status = dims.status ?? "";
-					if (status === "") continue;
-					byStatus.set(status, (byStatus.get(status) ?? 0) + (g.count ?? 0));
-				}
-				for (const [status, count] of byStatus) {
-					if (count > 0) {
-						sloStatus.values.push({
-							labels: { ...baseLabels, status },
-							value: count,
+					// SLO status: count per {tunnel, status} combination
+					const byStatus = new Map<string, number>();
+					for (const g of tunnelGroups) {
+						const dims = g.dimensions;
+						if (dims == null) continue;
+						const status = dims.status ?? "";
+						if (status === "") continue;
+						byStatus.set(status, (byStatus.get(status) ?? 0) + (g.count ?? 0));
+					}
+					for (const [status, count] of byStatus) {
+						if (count > 0) {
+							sloStatus.values.push({
+								labels: { ...baseLabels, status },
+								value: count,
+							});
+						}
+					}
+
+					// Effective SLO: weighted average across groups for the tunnel
+					let totalWeight = 0;
+					let weightedEffective = 0;
+					let weightedTarget = 0;
+					for (const g of tunnelGroups) {
+						const weight = g.count ?? 0;
+						if (weight === 0) continue;
+						totalWeight += weight;
+						weightedEffective += (g.avg?.effectiveSlo ?? 0) * weight;
+						weightedTarget += (g.avg?.slo ?? 0) * weight;
+					}
+
+					if (totalWeight > 0) {
+						effectiveSlo.values.push({
+							labels: baseLabels,
+							value: weightedEffective / totalWeight,
+						});
+						targetSlo.values.push({
+							labels: baseLabels,
+							value: weightedTarget / totalWeight,
 						});
 					}
-				}
-
-				// Effective SLO: weighted average across groups for the tunnel
-				let totalWeight = 0;
-				let weightedEffective = 0;
-				let weightedTarget = 0;
-				for (const g of tunnelGroups) {
-					const weight = g.count ?? 0;
-					if (weight === 0) continue;
-					totalWeight += weight;
-					weightedEffective += (g.avg?.effectiveSlo ?? 0) * weight;
-					weightedTarget += (g.avg?.slo ?? 0) * weight;
-				}
-
-				if (totalWeight > 0) {
-					effectiveSlo.values.push({
-						labels: baseLabels,
-						value: weightedEffective / totalWeight,
-					});
-					targetSlo.values.push({
-						labels: baseLabels,
-						value: weightedTarget / totalWeight,
-					});
 				}
 			}
 		}

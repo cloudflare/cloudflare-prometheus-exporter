@@ -395,8 +395,8 @@ Traffic volume metrics across Cloudflare's Network Analytics v2 datasets. All ar
 
 | Metric | Type | Labels |
 |--------|------|--------|
-| `cloudflare_network_analytics_dns_protection_bits_total` | counter | account, outcome, direction, ip_protocol, dns_query_type |
-| `cloudflare_network_analytics_dns_protection_packets_total` | counter | account, outcome, direction, ip_protocol, dns_query_type |
+| `cloudflare_network_analytics_dns_protection_bits_total` | counter | account, outcome, direction, ip_protocol |
+| `cloudflare_network_analytics_dns_protection_packets_total` | counter | account, outcome, direction, ip_protocol |
 
 ### Hostname Metrics
 
@@ -631,13 +631,15 @@ For mixed accounts (enterprise + free zones), only free zones are skipped—paid
 ┌────────────────────────────────────────────────────────────────────────┐
 │           MetricExporter.refresh() for account-scoped queries          │
 │                                                                        │
-│  Query Types (17 total):                                               │
-│  ��── ACCOUNT-LEVEL (single account per query, 5):                      │
+│  Query Types (19 total):                                               │
+│  ├── ACCOUNT-LEVEL (single account per query, 7):                      │
 │  │   ├── worker-totals                                                 │
 │  │   ├── logpush-account                                               │
 │  │   ├── magic-transit                                                 │
 │  │   ├── magic-transit-slo                                             │
-│  │   └── network-analytics                                             │
+│  │   ├── magic-transit-traffic                                         │
+│  │   ├── magic-firewall-samples                                        │
+│  │   ��── network-analytics                                             │
 │  │                                                                     │
 │  └── ZONE-LEVEL (all zones batched in one query, 12):                  │
 │      ├── http-metrics                                                  │
