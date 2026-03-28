@@ -39,8 +39,12 @@ function getActiveAccountQueries(
 	const hostnameEnabled =
 		parseCommaSeparated(config.hostMetricsAllowlist).size > 0 &&
 		!config.excludeHost;
+	const queryDenylist = parseCommaSeparated(config.queryDenylist);
 
 	return ACCOUNT_SCOPED_QUERIES.filter((q) => {
+		if (queryDenylist.has(q)) {
+			return false;
+		}
 		if (
 			isFreeTierAccount &&
 			!FREE_TIER_QUERIES.includes(q as (typeof FREE_TIER_QUERIES)[number])

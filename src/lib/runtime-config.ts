@@ -25,6 +25,7 @@ export const ConfigKeySchema = z.enum([
 	"cfZones",
 	"cfFreeTierAccounts",
 	"metricsDenylist",
+	"queryDenylist",
 	// Output options
 	"excludeHost",
 	"httpStatusGroup",
@@ -56,6 +57,7 @@ const ConfigValueSchemas = {
 	cfZones: z.string().nullable(),
 	cfFreeTierAccounts: z.string(),
 	metricsDenylist: z.string(),
+	queryDenylist: z.string(),
 	excludeHost: z.boolean(),
 	httpStatusGroup: z.boolean(),
 	hostMetricsAllowlist: z.string(),
@@ -86,6 +88,7 @@ export const ConfigOverridesSchema = z
 		cfZones: ConfigValueSchemas.cfZones.optional(),
 		cfFreeTierAccounts: ConfigValueSchemas.cfFreeTierAccounts.optional(),
 		metricsDenylist: ConfigValueSchemas.metricsDenylist.optional(),
+		queryDenylist: ConfigValueSchemas.queryDenylist.optional(),
 		excludeHost: ConfigValueSchemas.excludeHost.optional(),
 		httpStatusGroup: ConfigValueSchemas.httpStatusGroup.optional(),
 		hostMetricsAllowlist: ConfigValueSchemas.hostMetricsAllowlist.optional(),
@@ -119,6 +122,7 @@ export const ResolvedConfigSchema = z
 		cfZones: ConfigValueSchemas.cfZones,
 		cfFreeTierAccounts: ConfigValueSchemas.cfFreeTierAccounts,
 		metricsDenylist: ConfigValueSchemas.metricsDenylist,
+		queryDenylist: ConfigValueSchemas.queryDenylist,
 		excludeHost: ConfigValueSchemas.excludeHost,
 		httpStatusGroup: ConfigValueSchemas.httpStatusGroup,
 		hostMetricsAllowlist: ConfigValueSchemas.hostMetricsAllowlist,
@@ -136,6 +140,7 @@ export type ResolvedConfig = z.infer<typeof ResolvedConfigSchema>;
  */
 type OptionalEnvVars = {
 	METRICS_DENYLIST?: string;
+	QUERY_DENYLIST?: string;
 	CF_ACCOUNTS?: string;
 	CF_ZONES?: string;
 	CF_FREE_TIER_ACCOUNTS?: string;
@@ -190,6 +195,7 @@ export function getEnvDefaults(env: Env): ResolvedConfig {
 		cfZones: optionalEnv.CF_ZONES?.trim() || null,
 		cfFreeTierAccounts: optionalEnv.CF_FREE_TIER_ACCOUNTS?.trim() ?? "",
 		metricsDenylist: optionalEnv.METRICS_DENYLIST?.trim() ?? "",
+		queryDenylist: optionalEnv.QUERY_DENYLIST?.trim() ?? "",
 		excludeHost: z.coerce.boolean().catch(false).parse(env.EXCLUDE_HOST),
 		httpStatusGroup: z.coerce
 			.boolean()
@@ -283,6 +289,7 @@ function mergeConfig(
 		cfFreeTierAccounts:
 			overrides.cfFreeTierAccounts ?? defaults.cfFreeTierAccounts,
 		metricsDenylist: overrides.metricsDenylist ?? defaults.metricsDenylist,
+		queryDenylist: overrides.queryDenylist ?? defaults.queryDenylist,
 		excludeHost: overrides.excludeHost ?? defaults.excludeHost,
 		httpStatusGroup: overrides.httpStatusGroup ?? defaults.httpStatusGroup,
 		hostMetricsAllowlist:
