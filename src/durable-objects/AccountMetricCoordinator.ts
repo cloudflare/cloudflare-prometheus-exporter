@@ -31,6 +31,8 @@ const ACCOUNT_SCOPED_QUERIES = [
  * Filters account-scoped queries based on account tier and config.
  * Hostname metrics are excluded when the allowlist is empty or excludeHost is true
  * to avoid creating idle DOs that would alarm-cycle forever doing nothing.
+ * Queries listed in metricsDenylist are skipped entirely, preventing DO creation
+ * and the associated storage and API overhead.
  */
 function getActiveAccountQueries(
 	config: ResolvedConfig,
@@ -39,8 +41,12 @@ function getActiveAccountQueries(
 	const hostnameEnabled =
 		parseCommaSeparated(config.hostMetricsAllowlist).size > 0 &&
 		!config.excludeHost;
+	const queryDenylist = parseCommaSeparated(config.metricsDenylist);
 
 	return ACCOUNT_SCOPED_QUERIES.filter((q) => {
+		if (queryDenylist.has(q)) {
+			return false;
+		}
 		if (
 			isFreeTierAccount &&
 			!FREE_TIER_QUERIES.includes(q as (typeof FREE_TIER_QUERIES)[number])
@@ -56,6 +62,17 @@ function getActiveAccountQueries(
 
 // Zone-scoped REST queries (one DO per zone for parallelization and fault isolation)
 const ZONE_SCOPED_QUERIES = ["ssl-certificates", "lb-weight-metrics"] as const;
+
+/**
+ * Filters zone-scoped queries based on config.
+ * Queries listed in metricsDenylist are skipped entirely, preventing DO creation.
+ */
+function getActiveZoneQueries(
+	config: ResolvedConfig,
+): readonly (typeof ZONE_SCOPED_QUERIES)[number][] {
+	const queryDenylist = parseCommaSeparated(config.metricsDenylist);
+	return ZONE_SCOPED_QUERIES.filter((q) => !queryDenylist.has(q));
+}
 
 type AccountMetricCoordinatorState = {
 	accountId: string;
@@ -290,7 +307,7 @@ export class AccountMetricCoordinator extends DurableObject<Env> {
 			...(isFreeTierAccount
 				? []
 				: zones.flatMap((zone) =>
-						ZONE_SCOPED_QUERIES.map(async (query) => {
+						getActiveZoneQueries(config).map(async (query) => {
 							try {
 								const exporter = await MetricExporter.get(
 									`zone:${zone.id}:${query}`,
@@ -315,11 +332,12 @@ export class AccountMetricCoordinator extends DurableObject<Env> {
 					)),
 		]);
 
+		const activeZoneQueries = getActiveZoneQueries(config);
 		logger.info("Context pushed to exporters", {
 			account_scoped: accountQueries.length,
 			zone_scoped: isFreeTierAccount
 				? 0
-				: zones.length * ZONE_SCOPED_QUERIES.length,
+				: zones.length * activeZoneQueries.length,
 		});
 	}
 
@@ -386,7 +404,7 @@ export class AccountMetricCoordinator extends DurableObject<Env> {
 			? []
 			: await Promise.all(
 					state.zones.flatMap((zone) =>
-						ZONE_SCOPED_QUERIES.map(async (query) => {
+						getActiveZoneQueries(config).map(async (query) => {
 							try {
 								const exporter = await MetricExporter.get(
 									`zone:${zone.id}:${query}`,

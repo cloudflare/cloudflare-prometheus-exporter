@@ -58,7 +58,7 @@ Set in `wrangler.jsonc` or via `wrangler secret put`:
 | `CF_HTTP_STATUS_GROUP` | false | Group HTTP status codes (2xx, 4xx, etc.) |
 | `DISABLE_UI` | false | Disable landing page (returns 404) |
 | `DISABLE_CONFIG_API` | false | Disable config API endpoints (returns 404) |
-| `METRICS_DENYLIST` | - | Comma-separated list of metrics to exclude |
+| `METRICS_DENYLIST` | - | Comma-separated list of metric names **or query names** to exclude. Metric names (e.g. `cloudflare_zone_requests_total`) are filtered from Prometheus output. Query names (e.g. `colo-metrics`, `load-balancer-metrics`) skip DO creation entirely, preventing unnecessary API calls and storage overhead. |
 | `CF_ACCOUNTS` | - | Comma-separated account IDs to include (default: all) |
 | `CF_ZONES` | - | Comma-separated zone IDs to include (default: all) |
 | `CF_FREE_TIER_ACCOUNTS` | - | Comma-separated account IDs using free tier (skips paid-tier metrics) |
