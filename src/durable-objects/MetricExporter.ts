@@ -23,6 +23,14 @@ import {
 } from "../lib/types";
 
 const STATE_KEY = "state";
+const METRICS_CHUNK_PREFIX = "mx:";
+const COUNTERS_CHUNK_PREFIX = "cx:";
+
+/**
+ * Maximum bytes per storage chunk. Cloudflare Durable Objects enforce a 128 KiB
+ * per-value limit. We stay well below it to leave room for encoding overhead.
+ */
+const MAX_CHUNK_BYTES = 100_000;
 
 /**
  * Maximum allowed hostnames in HOST_METRICS_ALLOWLIST.
@@ -36,7 +44,7 @@ type MetricExporterState = {
 	scopeId: string;
 	queryName: string;
 
-	// Metric storage
+	// Metric storage (held in memory; persisted in separate chunks)
 	counters: Record<string, CounterState>;
 	metrics: MetricDefinition[];
 	lastIngest: number;
@@ -60,16 +68,85 @@ type MetricExporterState = {
 };
 
 /**
+ * Shape stored at STATE_KEY. The large `metrics` and `counters` fields are
+ * omitted here and stored separately as chunked string values so that each
+ * individual storage entry stays well below the 128 KiB Durable Object limit.
+ */
+type PersistedState = Omit<MetricExporterState, "metrics" | "counters"> & {
+	metricsChunks: number;
+	countersChunks: number;
+};
+
+/**
+ * Reads a chunked value from Durable Object storage.
+ * Chunks were written as plain JSON string segments with keys `${prefix}0`,
+ * `${prefix}1`, …, `${prefix}${count - 1}`.
+ */
+async function readChunks<T>(
+	storage: DurableObjectStorage,
+	prefix: string,
+	count: number,
+	fallback: T,
+): Promise<T> {
+	if (count === 0) return fallback;
+	const keys = Array.from({ length: count }, (_, i) => `${prefix}${i}`);
+	const map = await storage.get<string>(keys);
+	const json = keys.map((k) => map.get(k) ?? "").join("");
+	if (!json) return fallback;
+	return JSON.parse(json) as T;
+}
+
+/**
  * Durable Object that fetches and exports Prometheus metrics for a specific query scope.
  * Handles counter accumulation, alarm-based refresh scheduling, and metric caching.
  */
 export class MetricExporter extends DurableObject<Env> {
 	private state: MetricExporterState | undefined;
+	/** Tracks how many chunks are currently stored for each large field. */
+	private chunkCounts = { metrics: 0, counters: 0 };
 
 	constructor(ctx: DurableObjectState, env: Env) {
 		super(ctx, env);
 		ctx.blockConcurrencyWhile(async () => {
-			this.state = await ctx.storage.get<MetricExporterState>(STATE_KEY);
+			// Storage may hold the new chunked format (PersistedState) or the legacy
+			// format where metrics/counters were stored inline in a single blob.
+			const stored = await ctx.storage.get<
+				PersistedState | MetricExporterState
+			>(STATE_KEY);
+			if (stored === undefined) {
+				return;
+			}
+
+			if (
+				"metricsChunks" in stored &&
+				typeof stored.metricsChunks === "number"
+			) {
+				// New chunked format
+				this.chunkCounts = {
+					metrics: stored.metricsChunks,
+					counters: stored.countersChunks,
+				};
+				const { metricsChunks: _mc, countersChunks: _cc, ...base } = stored;
+				this.state = {
+					...base,
+					metrics: await readChunks<MetricDefinition[]>(
+						ctx.storage,
+						METRICS_CHUNK_PREFIX,
+						stored.metricsChunks,
+						[],
+					),
+					counters: await readChunks<Record<string, CounterState>>(
+						ctx.storage,
+						COUNTERS_CHUNK_PREFIX,
+						stored.countersChunks,
+						{},
+					),
+				};
+			} else {
+				// Legacy format — inline metrics/counters. Use as-is; will be
+				// transparently migrated to chunked format on the next saveState() call.
+				this.state = stored as MetricExporterState;
+			}
 		});
 	}
 
@@ -152,7 +229,7 @@ export class MetricExporter extends DurableObject<Env> {
 			lastSslFetch: 0,
 		};
 
-		await this.ctx.storage.put(STATE_KEY, this.state);
+		await this.saveState(this.state);
 	}
 
 	/**
@@ -192,7 +269,7 @@ export class MetricExporter extends DurableObject<Env> {
 			zones,
 			firewallRules,
 		};
-		await this.ctx.storage.put(STATE_KEY, this.state);
+		await this.saveState(this.state);
 
 		logger.info("Zone context updated", { zone_count: zones.length });
 
@@ -235,7 +312,7 @@ export class MetricExporter extends DurableObject<Env> {
 			accountName,
 			zoneMetadata: zone,
 		};
-		await this.ctx.storage.put(STATE_KEY, this.state);
+		await this.saveState(this.state);
 
 		logger.info("Zone metadata set", { zone: zone.name });
 
@@ -343,7 +420,7 @@ export class MetricExporter extends DurableObject<Env> {
 					state.scopeType === "zone" ? Date.now() : state.lastSslFetch,
 				lastError: null,
 			};
-			await this.ctx.storage.put(STATE_KEY, this.state);
+			await this.saveState(this.state);
 
 			logger.info("Refresh complete", {
 				metric_count: metrics.length,
@@ -352,10 +429,84 @@ export class MetricExporter extends DurableObject<Env> {
 			const msg = error instanceof Error ? error.message : String(error);
 			logger.error("Refresh failed", { error: msg });
 			this.state = { ...state, lastError: msg };
-			await this.ctx.storage.put(STATE_KEY, this.state);
+			await this.saveState(this.state);
 		}
 
 		await this.scheduleNextAlarm(config);
+	}
+
+	/**
+	 * Persist state to Durable Object storage using chunked encoding for the
+	 * large `metrics` and `counters` fields.
+	 *
+	 * The small scalar fields are stored at STATE_KEY. The large arrays/maps are
+	 * split into MAX_CHUNK_BYTES segments and stored at `mx:0`, `mx:1`, … and
+	 * `cx:0`, `cx:1`, … respectively. This keeps every individual storage value
+	 * well below the 128 KiB Durable Object per-entry limit.
+	 *
+	 * @param state Full in-memory state to persist.
+	 */
+	private async saveState(state: MetricExporterState): Promise<void> {
+		const [metricsChunks, countersChunks] = await Promise.all([
+			this.writeChunks(
+				METRICS_CHUNK_PREFIX,
+				state.metrics,
+				this.chunkCounts.metrics,
+			),
+			this.writeChunks(
+				COUNTERS_CHUNK_PREFIX,
+				state.counters,
+				this.chunkCounts.counters,
+			),
+		]);
+		this.chunkCounts = { metrics: metricsChunks, counters: countersChunks };
+
+		const { metrics: _m, counters: _c, ...base } = state;
+		const persisted: PersistedState = {
+			...base,
+			metricsChunks,
+			countersChunks,
+		};
+		await this.ctx.storage.put(STATE_KEY, persisted);
+	}
+
+	/**
+	 * Write a value to storage as a sequence of string chunks, each at most
+	 * MAX_CHUNK_BYTES bytes, and delete any leftover chunks from a previous
+	 * write that had more chunks.
+	 *
+	 * @param prefix Storage key prefix (`mx:` or `cx:`).
+	 * @param data Value to serialise and chunk.
+	 * @param prevCount Number of chunks written in the previous save.
+	 * @returns Number of chunks written.
+	 */
+	private async writeChunks(
+		prefix: string,
+		data: unknown,
+		prevCount: number,
+	): Promise<number> {
+		const json = JSON.stringify(data);
+		const newCount = Math.max(1, Math.ceil(json.length / MAX_CHUNK_BYTES));
+
+		const entries = new Map<string, string>();
+		for (let i = 0; i < newCount; i++) {
+			entries.set(
+				`${prefix}${i}`,
+				json.slice(i * MAX_CHUNK_BYTES, (i + 1) * MAX_CHUNK_BYTES),
+			);
+		}
+		await this.ctx.storage.put(entries);
+
+		// Delete stale chunks from a previous save that had more chunks
+		if (prevCount > newCount) {
+			const staleKeys = Array.from(
+				{ length: prevCount - newCount },
+				(_, i) => `${prefix}${newCount + i}`,
+			);
+			await this.ctx.storage.delete(staleKeys);
+		}
+
+		return newCount;
 	}
 
 	/**
