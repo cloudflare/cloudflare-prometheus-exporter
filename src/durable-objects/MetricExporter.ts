@@ -23,6 +23,14 @@ import {
 } from "../lib/types";
 
 const STATE_KEY = "state";
+const METRICS_CHUNK_PREFIX = "mx:";
+const COUNTERS_CHUNK_PREFIX = "cx:";
+
+/**
+ * Maximum bytes per storage chunk. Cloudflare Durable Objects enforce a 128 KiB
+ * per-value limit. We stay well below it to leave room for encoding overhead.
+ */
+const MAX_CHUNK_BYTES = 100_000;
 
 /**
  * Maximum allowed hostnames in HOST_METRICS_ALLOWLIST.
@@ -36,7 +44,7 @@ type MetricExporterState = {
 	scopeId: string;
 	queryName: string;
 
-	// Metric storage
+	// Metric storage (held in memory; persisted in separate chunks)
 	counters: Record<string, CounterState>;
 	metrics: MetricDefinition[];
 	lastIngest: number;
@@ -55,9 +63,55 @@ type MetricExporterState = {
 	lastRefresh: number;
 	lastError: string | null;
 
+	// Auto-disable: stops retrying when the API persistently denies access
+	disabledReason: string | null;
+
 	// SSL cert cache (zone-scoped only)
 	lastSslFetch: number;
 };
+
+/**
+ * Fields excluded from persistence because they are either chunked separately
+ * (metrics/counters) or transient context repopulated via RPC every cycle
+ * (zones/firewallRules/zoneMetadata). Excluding them shrinks the persisted
+ * state dramatically and eliminates redundant serialization across 21+ DOs.
+ */
+type TransientFields =
+	| "metrics"
+	| "counters"
+	| "zones"
+	| "firewallRules"
+	| "zoneMetadata";
+
+/**
+ * Shape stored at STATE_KEY. Large and transient fields are excluded to keep
+ * each storage entry well below the 128 KiB Durable Object limit and to
+ * avoid redundant serialization of zone context that is already held by
+ * AccountMetricCoordinator.
+ */
+type PersistedState = Omit<MetricExporterState, TransientFields> & {
+	metricsChunks: number;
+	countersChunks: number;
+};
+
+/**
+ * Read a chunked value back from storage.
+ * Chunks were written as plain JSON string segments with keys `${prefix}0`,
+ * `${prefix}1`, …, `${prefix}${count - 1}`.
+ */
+async function readChunks<T>(
+	storage: DurableObjectStorage,
+	prefix: string,
+	count: number,
+	fallback: T,
+): Promise<T> {
+	if (count === 0) return fallback;
+	const keys = Array.from({ length: count }, (_, i) => `${prefix}${i}`);
+	const map = await storage.get<string>(keys);
+	const json = keys.map((k) => map.get(k) ?? "").join("");
+	if (!json) return fallback;
+	return JSON.parse(json) as T;
+}
 
 /**
  * Durable Object that fetches and exports Prometheus metrics for a specific query scope.
@@ -65,11 +119,60 @@ type MetricExporterState = {
  */
 export class MetricExporter extends DurableObject<Env> {
 	private state: MetricExporterState | undefined;
+	/** Tracks how many chunks are currently stored for each large field. */
+	private chunkCounts = { metrics: 0, counters: 0 };
 
 	constructor(ctx: DurableObjectState, env: Env) {
 		super(ctx, env);
 		ctx.blockConcurrencyWhile(async () => {
-			this.state = await ctx.storage.get<MetricExporterState>(STATE_KEY);
+			const stored = await ctx.storage.get<
+				PersistedState | MetricExporterState
+			>(STATE_KEY);
+			if (stored === undefined) return;
+
+			// Transient fields are not persisted — restore defaults.
+			// They'll be repopulated via updateZoneContext() / initializeZone().
+			const transientDefaults = {
+				zones: [] as Zone[],
+				firewallRules: {} as Record<string, string>,
+				zoneMetadata: null as Zone | null,
+			};
+
+			if (
+				"metricsChunks" in stored &&
+				typeof stored.metricsChunks === "number"
+			) {
+				// Chunked format
+				this.chunkCounts = {
+					metrics: stored.metricsChunks,
+					counters: stored.countersChunks,
+				};
+				const { metricsChunks: _mc, countersChunks: _cc, ...base } = stored;
+				this.state = {
+					...base,
+					...transientDefaults,
+					metrics: await readChunks<MetricDefinition[]>(
+						ctx.storage,
+						METRICS_CHUNK_PREFIX,
+						stored.metricsChunks,
+						[],
+					),
+					counters: await readChunks<Record<string, CounterState>>(
+						ctx.storage,
+						COUNTERS_CHUNK_PREFIX,
+						stored.countersChunks,
+						{},
+					),
+				};
+			} else {
+				// Legacy inline format — will be migrated on next saveState()
+				const legacy = stored as MetricExporterState;
+				this.state = {
+					...legacy,
+					...transientDefaults,
+					disabledReason: legacy.disabledReason ?? null,
+				};
+			}
 		});
 	}
 
@@ -149,10 +252,11 @@ export class MetricExporter extends DurableObject<Env> {
 			refreshInterval: config.metricRefreshIntervalSeconds,
 			lastRefresh: 0,
 			lastError: null,
+			disabledReason: null,
 			lastSslFetch: 0,
 		};
 
-		await this.ctx.storage.put(STATE_KEY, this.state);
+		await this.saveState(this.state);
 	}
 
 	/**
@@ -182,8 +286,10 @@ export class MetricExporter extends DurableObject<Env> {
 			return;
 		}
 
-		const isFirstContext =
-			state.zones.length === 0 && zones.length > 0 && state.lastRefresh === 0;
+		// Zones are transient (not persisted), so after a restart they're always
+		// empty. Trigger an immediate refresh whenever zones go from empty to
+		// populated to bootstrap the alarm cycle.
+		const needsBootstrap = state.zones.length === 0 && zones.length > 0;
 
 		this.state = {
 			...state,
@@ -192,12 +298,11 @@ export class MetricExporter extends DurableObject<Env> {
 			zones,
 			firewallRules,
 		};
-		await this.ctx.storage.put(STATE_KEY, this.state);
+		await this.saveState(this.state);
 
 		logger.info("Zone context updated", { zone_count: zones.length });
 
-		// On first context push, fetch immediately then schedule recurring alarm
-		if (isFirstContext) {
+		if (needsBootstrap) {
 			await this.refreshWithTimeRange(timeRange, config, logger);
 		}
 	}
@@ -227,7 +332,9 @@ export class MetricExporter extends DurableObject<Env> {
 			return;
 		}
 
-		const isFirstInit = state.zoneMetadata === null && state.lastRefresh === 0;
+		// zoneMetadata is transient (not persisted), so after a restart it's
+		// always null. Bootstrap the alarm cycle whenever metadata arrives.
+		const needsBootstrap = state.zoneMetadata === null;
 
 		this.state = {
 			...state,
@@ -235,12 +342,11 @@ export class MetricExporter extends DurableObject<Env> {
 			accountName,
 			zoneMetadata: zone,
 		};
-		await this.ctx.storage.put(STATE_KEY, this.state);
+		await this.saveState(this.state);
 
 		logger.info("Zone metadata set", { zone: zone.name });
 
-		// On first init, fetch immediately then schedule recurring alarm
-		if (isFirstInit) {
+		if (needsBootstrap) {
 			await this.refreshWithTimeRange(timeRange, config, logger);
 		}
 	}
@@ -286,6 +392,15 @@ export class MetricExporter extends DurableObject<Env> {
 		logger: Logger,
 	): Promise<void> {
 		const state = this.getState();
+
+		// Skip permanently disabled exporters (e.g., account lacks API access)
+		if (state.disabledReason !== null) {
+			logger.debug("Skipping refresh - disabled", {
+				reason: state.disabledReason,
+			});
+			await this.scheduleNextAlarm(config);
+			return;
+		}
 
 		// Skip if zone context not yet pushed (account-scoped needs zones)
 		if (state.scopeType === "account" && state.zones.length === 0) {
@@ -343,16 +458,31 @@ export class MetricExporter extends DurableObject<Env> {
 					state.scopeType === "zone" ? Date.now() : state.lastSslFetch,
 				lastError: null,
 			};
-			await this.ctx.storage.put(STATE_KEY, this.state);
+			await this.saveState(this.state);
 
 			logger.info("Refresh complete", {
 				metric_count: metrics.length,
 			});
 		} catch (error) {
 			const msg = error instanceof Error ? error.message : String(error);
-			logger.error("Refresh failed", { error: msg });
-			this.state = { ...state, lastError: msg };
-			await this.ctx.storage.put(STATE_KEY, this.state);
+
+			// Auto-disable on persistent access denial to stop retry spam
+			if (msg.includes("does not have access")) {
+				const reason = `API access denied: ${msg}`;
+				logger.warn("Disabling exporter - account lacks API access", {
+					query: state.queryName,
+					reason,
+				});
+				this.state = {
+					...state,
+					lastError: msg,
+					disabledReason: reason,
+				};
+			} else {
+				logger.error("Refresh failed", { error: msg });
+				this.state = { ...state, lastError: msg };
+			}
+			await this.saveState(this.state);
 		}
 
 		await this.scheduleNextAlarm(config);
@@ -376,6 +506,77 @@ export class MetricExporter extends DurableObject<Env> {
 		const nextAlarm = startOfInterval + intervalMs + jitter;
 
 		await this.ctx.storage.setAlarm(nextAlarm);
+	}
+
+	/**
+	 * Persist state using chunked storage. Metrics and counters are stored
+	 * as separate chunked string values to stay under the 128 KiB limit.
+	 *
+	 * @param state Full in-memory state to persist.
+	 */
+	private async saveState(state: MetricExporterState): Promise<void> {
+		const [metricsChunks, countersChunks] = await Promise.all([
+			this.writeChunks(
+				METRICS_CHUNK_PREFIX,
+				state.metrics,
+				this.chunkCounts.metrics,
+			),
+			this.writeChunks(
+				COUNTERS_CHUNK_PREFIX,
+				state.counters,
+				this.chunkCounts.counters,
+			),
+		]);
+		this.chunkCounts = { metrics: metricsChunks, counters: countersChunks };
+
+		const {
+			metrics: _m,
+			counters: _c,
+			zones: _z,
+			firewallRules: _fr,
+			zoneMetadata: _zm,
+			...base
+		} = state;
+		const persisted: PersistedState = {
+			...base,
+			metricsChunks,
+			countersChunks,
+		};
+		await this.ctx.storage.put(STATE_KEY, persisted);
+	}
+
+	/**
+	 * Write a value to storage as a sequence of string chunks, each at most
+	 * MAX_CHUNK_BYTES bytes, and delete any leftover chunks from a previous
+	 * write that had more chunks.
+	 */
+	private async writeChunks(
+		prefix: string,
+		data: unknown,
+		prevCount: number,
+	): Promise<number> {
+		const json = JSON.stringify(data);
+		const newCount = Math.max(1, Math.ceil(json.length / MAX_CHUNK_BYTES));
+
+		const entries: Record<string, string> = {};
+		for (let i = 0; i < newCount; i++) {
+			entries[`${prefix}${i}`] = json.slice(
+				i * MAX_CHUNK_BYTES,
+				(i + 1) * MAX_CHUNK_BYTES,
+			);
+		}
+		await this.ctx.storage.put(entries);
+
+		// Delete stale chunks from a previous save that had more chunks
+		if (prevCount > newCount) {
+			const staleKeys = Array.from(
+				{ length: prevCount - newCount },
+				(_, i) => `${prefix}${newCount + i}`,
+			);
+			await this.ctx.storage.delete(staleKeys);
+		}
+
+		return newCount;
 	}
 
 	/**
@@ -568,7 +769,10 @@ export class MetricExporter extends DurableObject<Env> {
 		rawMetrics: MetricDefinition[],
 		existingCounters: Record<string, CounterState>,
 	): { metrics: MetricDefinition[]; counters: Record<string, CounterState> } {
-		const newCounters: Record<string, CounterState> = { ...existingCounters };
+		// Start empty — only counters present in the current fetch survive.
+		// This prunes stale entries (removed LBs, rotated hosts, gone colos)
+		// and bounds memory to current metric cardinality.
+		const newCounters: Record<string, CounterState> = {};
 
 		const metrics = rawMetrics.map((metric) => {
 			if (metric.type !== "counter") {
@@ -577,7 +781,10 @@ export class MetricExporter extends DurableObject<Env> {
 
 			const processedValues: MetricValue[] = metric.values.map((value) => {
 				const key = metricKey(metric.name, value.labels);
-				newCounters[key] = this.updateCounter(newCounters[key], value.value);
+				newCounters[key] = this.updateCounter(
+					existingCounters[key],
+					value.value,
+				);
 				return { labels: value.labels, value: newCounters[key].accumulated };
 			});
 

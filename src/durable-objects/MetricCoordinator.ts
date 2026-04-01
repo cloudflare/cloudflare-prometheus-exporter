@@ -23,6 +23,10 @@ type MetricCoordinatorState = {
 export class MetricCoordinator extends DurableObject<Env> {
 	private state: MetricCoordinatorState | undefined;
 
+	/** Cached Prometheus output to avoid re-collecting from all DOs on every scrape. */
+	private cachedOutput: string | null = null;
+	private cachedOutputTimestamp = 0;
+
 	/**
 	 * Gets or creates singleton MetricCoordinator instance.
 	 *
@@ -145,6 +149,16 @@ export class MetricCoordinator extends DurableObject<Env> {
 		const config = await getConfig(this.env);
 		const logger = this.createLogger(config);
 
+		// Return cached output if still fresh (avoids 41+ DO RPC calls per scrape)
+		const cacheTtlMs = config.metricRefreshIntervalSeconds * 1000;
+		if (
+			this.cachedOutput !== null &&
+			Date.now() - this.cachedOutputTimestamp < cacheTtlMs
+		) {
+			logger.debug("Returning cached metrics output");
+			return this.cachedOutput;
+		}
+
 		logger.info("Collecting metrics");
 		const accounts = await this.refreshAccountsIfStale(config, logger);
 
@@ -224,10 +238,14 @@ export class MetricCoordinator extends DurableObject<Env> {
 		);
 
 		const metricsDenylist = parseCommaSeparated(config.metricsDenylist);
-		return serializeToPrometheus([...exporterMetrics, ...allMetrics], {
+		const output = serializeToPrometheus([...exporterMetrics, ...allMetrics], {
 			denylist: metricsDenylist,
 			excludeLabels: config.excludeHost ? new Set(["host"]) : undefined,
 		});
+
+		this.cachedOutput = output;
+		this.cachedOutputTimestamp = Date.now();
+		return output;
 	}
 
 	/**

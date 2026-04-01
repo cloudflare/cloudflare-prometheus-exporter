@@ -916,6 +916,9 @@ export class CloudflareMetricsClient {
 			this.logger.error("GraphQL error (magic-transit-slo)", {
 				error: result.error.message,
 			});
+			if (result.error.message.includes("does not have access")) {
+				throw new Error(result.error.message);
+			}
 			return [];
 		}
 
@@ -1049,6 +1052,9 @@ export class CloudflareMetricsClient {
 			this.logger.error("GraphQL error (magic-transit-traffic)", {
 				error: result.error.message,
 			});
+			if (result.error.message.includes("does not have access")) {
+				throw new Error(result.error.message);
+			}
 			return [];
 		}
 
@@ -1114,6 +1120,9 @@ export class CloudflareMetricsClient {
 			this.logger.error("GraphQL error (magic-firewall-samples)", {
 				error: result.error.message,
 			});
+			if (result.error.message.includes("does not have access")) {
+				throw new Error(result.error.message);
+			}
 			return [];
 		}
 
@@ -1178,6 +1187,9 @@ export class CloudflareMetricsClient {
 			this.logger.error("GraphQL error (network-analytics)", {
 				error: result.error.message,
 			});
+			if (result.error.message.includes("does not have access")) {
+				throw new Error(result.error.message);
+			}
 			return [];
 		}
 
@@ -1336,6 +1348,9 @@ export class CloudflareMetricsClient {
 				account: normalizedAccount,
 				error: result.error.message,
 			});
+			if (result.error.message.includes("does not have access")) {
+				throw new Error(result.error.message);
+			}
 			return [];
 		}
 
@@ -1398,6 +1413,9 @@ export class CloudflareMetricsClient {
 				account: normalizedAccount,
 				error: result.error.message,
 			});
+			if (result.error.message.includes("does not have access")) {
+				throw new Error(result.error.message);
+			}
 			return [];
 		}
 
