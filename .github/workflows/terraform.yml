@@ -1,0 +1,44 @@
+name: Terraform sample checks
+
+# Runs `terraform fmt -check` and `terraform validate` against the sample
+# deployment in terraform/. Purely a lint — does not init a backend or deploy.
+on:
+  push:
+    paths:
+      - "terraform/**"
+      - ".github/workflows/terraform.yml"
+  pull_request:
+    paths:
+      - "terraform/**"
+      - ".github/workflows/terraform.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  fmt-and-validate:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: terraform
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - name: Read .terraform-version
+        id: tfversion
+        run: echo "version=$(cat .terraform-version)" >> "$GITHUB_OUTPUT"
+
+      - name: Set up Terraform
+        uses: hashicorp/setup-terraform@b9cd54a3c349d3f38e8881555d616ced269862dd # v3
+        with:
+          terraform_version: ${{ steps.tfversion.outputs.version }}
+
+      - name: terraform fmt
+        run: terraform fmt -check -recursive -diff
+
+      - name: terraform init (no backend)
+        run: terraform init -backend=false
+
+      - name: terraform validate
+        run: terraform validate

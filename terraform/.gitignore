@@ -1,0 +1,21 @@
+# Terraform working data (regenerable; keep out of git).
+.terraform/
+.terraform.tfstate.lock.info
+
+# State — never commit. Use a remote backend for team workflows.
+*.tfstate
+*.tfstate.*
+crash.log
+crash.*.log
+
+# Local variable files (may contain secrets like API tokens).
+terraform.tfvars
+*.auto.tfvars
+*.auto.tfvars.json
+
+# DO commit the lock file (.terraform.lock.hcl) so provider versions are
+# reproducible across operators and CI. It is intentionally NOT ignored.
+
+# Editor / OS noise
+.DS_Store
+*.swp

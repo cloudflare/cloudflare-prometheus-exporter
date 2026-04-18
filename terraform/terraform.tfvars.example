@@ -1,0 +1,43 @@
+# Copy to terraform.tfvars and fill in, or pass with `-var-file=`.
+# terraform.tfvars is gitignored — it contains secrets.
+
+# --- Required ----------------------------------------------------------------
+cloudflare_account_id = "0000000000000000000000000000000000"
+cloudflare_api_token  = "REPLACE_ME"
+
+# --- Common overrides --------------------------------------------------------
+# All have sensible defaults matching wrangler.jsonc.
+
+# worker_name          = "cloudflare-prometheus-exporter"
+# log_level            = "info"           # trace|debug|info|warn|error|fatal
+# scrape_delay_seconds = 300
+
+# --- Optional allowlists -----------------------------------------------------
+# Leave unset to scrape everything the token can see.
+
+# cf_accounts            = "acct-id-1,acct-id-2"
+# cf_zones               = "zone-id-1,zone-id-2"
+# cf_free_tier_accounts  = "free-acct-1"
+# metrics_denylist       = "cf_zone_requests_bypass_total"
+
+# --- Optional: custom domain -------------------------------------------------
+# If set, attaches e.g. metrics.example.com to the Worker. Both fields must
+# be set together, and the zone must already exist in your Cloudflare account.
+
+# custom_domain         = "metrics.example.com"
+# custom_domain_zone_id = "0000000000000000000000000000000000"
+
+# --- Optional: tail log forwarding -------------------------------------------
+# Forward this Worker's logs to another Worker (e.g. a log-shipper to your
+# SIEM). Leave as [] (default) to disable.
+
+# tail_consumers = [
+#   { service = "my-log-shipper" },
+# ]
+
+# --- Optional: separate runtime token ----------------------------------------
+# By default the deploy token is reused at runtime. For least-privilege
+# setups, set this to a read-only analytics token and narrow the deploy
+# token to Workers Scripts/KV Edit only.
+
+# cloudflare_api_token_runtime = "REPLACE_ME_RUNTIME_ONLY_TOKEN"
