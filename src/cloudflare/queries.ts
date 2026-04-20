@@ -15,6 +15,7 @@ export const MetricQueryNameSchema = z.enum([
 	"network-analytics",
 	"stream-video-playback",
 	"stream-live-inputs",
+	"images",
 	// Zone-level
 	"http-metrics",
 	"adaptive-metrics",
@@ -51,6 +52,7 @@ export const ACCOUNT_LEVEL_QUERIES = [
 	"network-analytics",
 	"stream-video-playback",
 	"stream-live-inputs",
+	"images",
 ] as const;
 
 /**

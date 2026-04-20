@@ -533,6 +533,8 @@ export class CloudflareMetricsClient {
 					normalizedAccount,
 					timeRange,
 				);
+			case "images":
+				return this.getImagesMetrics(accountId, normalizedAccount);
 			default: {
 				const _exhaustive: never = query;
 				throw new Error(`Unknown account metric query: ${_exhaustive}`);
@@ -1455,6 +1457,49 @@ export class CloudflareMetricsClient {
 		return [segments, bitRate, gopDuration, uploadRatio].filter(
 			(m) => m.values.length > 0,
 		);
+	}
+
+	/**
+	 * Fetches Cloudflare Images storage metrics (current count and allowed limit).
+	 *
+	 * @param accountId Cloudflare account ID.
+	 * @param normalizedAccount Normalized account name for labels.
+	 * @returns Images count metrics.
+	 */
+	private async getImagesMetrics(
+		accountId: string,
+		normalizedAccount: string,
+	): Promise<MetricDefinition[]> {
+		const countCurrent: MetricDefinition = {
+			name: "cloudflare_images_count_current",
+			help: "Current number of images stored in Cloudflare Images",
+			type: "gauge",
+			values: [],
+		};
+		const countAllowed: MetricDefinition = {
+			name: "cloudflare_images_count_allowed",
+			help: "Maximum number of images allowed by the account plan",
+			type: "gauge",
+			values: [],
+		};
+
+		try {
+			const response = await this.api.images.v1.stats.get({
+				account_id: accountId,
+			});
+			const labels = { account: normalizedAccount };
+			countCurrent.values.push({ labels, value: response.count?.current ?? 0 });
+			countAllowed.values.push({ labels, value: response.count?.allowed ?? 0 });
+		} catch (error) {
+			const msg = error instanceof Error ? error.message : String(error);
+			this.logger.error("Failed to fetch Images stats", {
+				account_id: accountId,
+				error: msg,
+			});
+			return [];
+		}
+
+		return [countCurrent, countAllowed].filter((m) => m.values.length > 0);
 	}
 
 	/**
