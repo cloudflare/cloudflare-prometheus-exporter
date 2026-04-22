@@ -1,0 +1,227 @@
+# Default values for cloudflare-prometheus-exporter.
+
+replicaCount: 1
+
+image:
+  repository: ghcr.io/stackdone/cloudflare-prometheus-exporter
+  pullPolicy: IfNotPresent
+  # tag: ""  # Defaults to .Chart.AppVersion
+
+imagePullSecrets: []
+nameOverride: ""
+fullnameOverride: ""
+
+# ---------------------------------------------------------------------------
+# Cloudflare credentials
+# ---------------------------------------------------------------------------
+cloudflare:
+  # Cloudflare API token with read permissions.
+  # Ignored when existingSecret is set.
+  apiToken: ""
+
+  # Name of an existing Secret containing the API token.
+  # The secret must have a key matching existingSecretKey.
+  existingSecret: ""
+  existingSecretKey: "api-token"
+
+# ---------------------------------------------------------------------------
+# Optional HTTP Basic Auth
+# ---------------------------------------------------------------------------
+basicAuth:
+  enabled: false
+  username: ""
+  password: ""
+
+  # Use an existing Secret instead of creating one from username/password above.
+  existingSecret: ""
+  existingSecretUsernameKey: "username"
+  existingSecretPasswordKey: "password"
+
+# ---------------------------------------------------------------------------
+# Exporter configuration (maps to environment variables)
+# ---------------------------------------------------------------------------
+config:
+  # Comma-separated list of Cloudflare account IDs to scrape (empty = all)
+  cfAccounts: ""
+  # Comma-separated list of zone IDs to scrape (empty = all)
+  cfZones: ""
+  # Comma-separated list of free-tier account IDs
+  cfFreeTierAccounts: ""
+  # Comma-separated list of metrics to exclude
+  metricsDenylist: ""
+  # Comma-separated list of hostnames for per-hostname metrics (max 50)
+  hostMetricsAllowlist: ""
+
+  # Seconds to wait before first metric fetch (data propagation lag)
+  scrapeDelaySeconds: 300
+  # Background refresh interval in seconds
+  metricRefreshIntervalSeconds: 60
+  # GraphQL query time window in seconds
+  timeWindowSeconds: 60
+  # Max results per GraphQL query
+  queryLimit: 10000
+
+  # Cache TTLs (seconds)
+  accountListCacheTtlSeconds: 600
+  zoneListCacheTtlSeconds: 1800
+  sslCertsCacheTtlSeconds: 1800
+  healthCheckCacheTtlSeconds: 10
+  hostMetricsDelaySeconds: 60
+
+  # Prometheus metrics path
+  metricsPath: /metrics
+
+  # Feature flags
+  excludeHost: false
+  cfHttpStatusGroup: false
+  disableUi: false
+  disableConfigApi: false
+
+  # Log level: debug | info | warn | error
+  logLevel: info
+  # Log format: json | pretty
+  logFormat: json
+
+# Extra environment variables injected directly into the container.
+# Useful for any env var not covered by .Values.config.
+extraEnv: []
+# - name: MY_VAR
+#   value: "my-value"
+
+# Reference environment variables from existing ConfigMaps or Secrets.
+extraEnvFrom: []
+# - secretRef:
+#     name: my-extra-secret
+# - configMapRef:
+#     name: my-extra-configmap
+
+# ---------------------------------------------------------------------------
+# Service
+# ---------------------------------------------------------------------------
+service:
+  type: ClusterIP
+  port: 8787
+  annotations: {}
+  # Add prometheus.io/scrape annotations to the Service for annotation-based discovery.
+  addPrometheusScrapeAnnotation: false
+
+# ---------------------------------------------------------------------------
+# ServiceAccount
+# ---------------------------------------------------------------------------
+serviceAccount:
+  create: true
+  annotations: {}
+  # Explicit name; generated from fullname template when empty.
+  name: ""
+  automountServiceAccountToken: false
+
+# ---------------------------------------------------------------------------
+# Pod configuration
+# ---------------------------------------------------------------------------
+podAnnotations: {}
+podLabels: {}
+deploymentAnnotations: {}
+
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 1000
+  runAsGroup: 1000
+  fsGroup: 1000
+  seccompProfile:
+    type: RuntimeDefault
+
+securityContext:
+  allowPrivilegeEscalation: false
+  capabilities:
+    drop:
+      - ALL
+  readOnlyRootFilesystem: false  # wrangler writes .dev.vars at startup
+  runAsNonRoot: true
+  runAsUser: 1000
+
+# ---------------------------------------------------------------------------
+# Probes
+# ---------------------------------------------------------------------------
+livenessProbe:
+  httpGet:
+    path: /health
+    port: http
+  initialDelaySeconds: 30
+  periodSeconds: 30
+  timeoutSeconds: 5
+  failureThreshold: 3
+
+readinessProbe:
+  httpGet:
+    path: /health
+    port: http
+  initialDelaySeconds: 10
+  periodSeconds: 15
+  timeoutSeconds: 5
+  failureThreshold: 3
+
+# ---------------------------------------------------------------------------
+# Resources
+# ---------------------------------------------------------------------------
+resources: {}
+# limits:
+#   cpu: 500m
+#   memory: 256Mi
+# requests:
+#   cpu: 100m
+#   memory: 128Mi
+
+# ---------------------------------------------------------------------------
+# Scheduling
+# ---------------------------------------------------------------------------
+nodeSelector: {}
+tolerations: []
+affinity: {}
+priorityClassName: ""
+topologySpreadConstraints: []
+
+# ---------------------------------------------------------------------------
+# Prometheus ServiceMonitor (requires prometheus-operator)
+# ---------------------------------------------------------------------------
+serviceMonitor:
+  enabled: false
+  # Namespace for the ServiceMonitor; defaults to .Release.Namespace
+  namespace: ""
+  labels: {}
+  annotations: {}
+  # Scrape interval (e.g. "60s"). Should be >= metricRefreshIntervalSeconds.
+  interval: 60s
+  scrapeTimeout: 30s
+  # Override the metrics path if you changed config.metricsPath
+  path: ""
+  relabelings: []
+  metricRelabelings: []
+  targetLabels: []
+  # Basic auth for ServiceMonitor (when basicAuth is enabled)
+  basicAuth: {}
+  # credentials:
+  #   username:
+  #     name: secret-name
+  #     key: username
+  #   password:
+  #     name: secret-name
+  #     key: password
+
+# ---------------------------------------------------------------------------
+# PrometheusRule (requires prometheus-operator)
+# ---------------------------------------------------------------------------
+prometheusRule:
+  enabled: false
+  namespace: ""
+  labels: {}
+  annotations: {}
+  groups: []
+  # - name: cloudflare-exporter
+  #   rules:
+  #     - alert: CloudflareExporterDown
+  #       expr: up{job="cloudflare-prometheus-exporter"} == 0
+  #       for: 5m
+  #       labels:
+  #         severity: critical
+  #       annotations:
+  #         summary: "Cloudflare exporter is down"

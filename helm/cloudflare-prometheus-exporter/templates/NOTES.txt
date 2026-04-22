@@ -1,0 +1,32 @@
+{{- include "cloudflare-prometheus-exporter.validateValues" . }}
+
+Cloudflare Prometheus Exporter has been deployed.
+
+1. Get the metrics endpoint URL:
+
+{{- if contains "ClusterIP" .Values.service.type }}
+   kubectl port-forward svc/{{ include "cloudflare-prometheus-exporter.fullname" . }} 8787:{{ .Values.service.port }} -n {{ .Release.Namespace }}
+   curl http://localhost:8787{{ .Values.config.metricsPath }}
+{{- else if contains "NodePort" .Values.service.type }}
+   export NODE_PORT=$(kubectl get svc {{ include "cloudflare-prometheus-exporter.fullname" . }} -n {{ .Release.Namespace }} -o jsonpath="{.spec.ports[0].nodePort}")
+   export NODE_IP=$(kubectl get nodes -o jsonpath="{.items[0].status.addresses[0].address}")
+   curl http://$NODE_IP:$NODE_PORT{{ .Values.config.metricsPath }}
+{{- end }}
+
+2. Check the exporter health:
+   curl http://localhost:8787/health
+
+{{- if .Values.serviceMonitor.enabled }}
+
+3. ServiceMonitor is enabled. Prometheus will scrape metrics automatically
+   with interval {{ .Values.serviceMonitor.interval }}.
+{{- else }}
+
+3. ServiceMonitor is DISABLED. To enable Prometheus Operator scraping:
+   helm upgrade {{ .Release.Name }} . --set serviceMonitor.enabled=true
+{{- end }}
+
+{{- if .Values.basicAuth.enabled }}
+
+4. Basic auth is ENABLED. Set Authorization header on scrape requests.
+{{- end }}

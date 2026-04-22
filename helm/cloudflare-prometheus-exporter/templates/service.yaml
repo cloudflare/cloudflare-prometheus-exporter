@@ -1,0 +1,28 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "cloudflare-prometheus-exporter.fullname" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "cloudflare-prometheus-exporter.labels" . | nindent 4 }}
+  {{- $annotations := .Values.service.annotations | default dict }}
+  {{- if .Values.service.addPrometheusScrapeAnnotation }}
+  {{- $annotations = merge $annotations (dict
+    "prometheus.io/scrape" "true"
+    "prometheus.io/port"   (toString .Values.service.port)
+    "prometheus.io/path"   .Values.config.metricsPath
+  ) }}
+  {{- end }}
+  {{- with $annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  type: {{ .Values.service.type }}
+  selector:
+    {{- include "cloudflare-prometheus-exporter.selectorLabels" . | nindent 4 }}
+  ports:
+    - name: http
+      port: {{ .Values.service.port }}
+      targetPort: http
+      protocol: TCP

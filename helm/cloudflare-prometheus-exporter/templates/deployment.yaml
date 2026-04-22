@@ -1,0 +1,174 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "cloudflare-prometheus-exporter.fullname" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "cloudflare-prometheus-exporter.labels" . | nindent 4 }}
+  {{- with .Values.deploymentAnnotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  replicas: {{ .Values.replicaCount }}
+  selector:
+    matchLabels:
+      {{- include "cloudflare-prometheus-exporter.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "cloudflare-prometheus-exporter.selectorLabels" . | nindent 8 }}
+        {{- with .Values.podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      {{- with .Values.podAnnotations }}
+      annotations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+    spec:
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      serviceAccountName: {{ include "cloudflare-prometheus-exporter.serviceAccountName" . }}
+      {{- with .Values.podSecurityContext }}
+      securityContext:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.priorityClassName }}
+      priorityClassName: {{ . }}
+      {{- end }}
+      {{- with .Values.topologySpreadConstraints }}
+      topologySpreadConstraints:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: {{ .Chart.Name }}
+          {{- with .Values.securityContext }}
+          securityContext:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          ports:
+            - name: http
+              containerPort: 8787
+              protocol: TCP
+          env:
+            # Cloudflare API token — read from secret
+            - name: CLOUDFLARE_API_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "cloudflare-prometheus-exporter.secretName" . }}
+                  key: {{ .Values.cloudflare.existingSecretKey }}
+
+            {{- if .Values.basicAuth.enabled }}
+            - name: BASIC_AUTH_USER
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "cloudflare-prometheus-exporter.basicAuthSecretName" . }}
+                  key: {{ .Values.basicAuth.existingSecretUsernameKey }}
+            - name: BASIC_AUTH_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "cloudflare-prometheus-exporter.basicAuthSecretName" . }}
+                  key: {{ .Values.basicAuth.existingSecretPasswordKey }}
+            {{- end }}
+
+            # Cloudflare filter configuration
+            {{- if .Values.config.cfAccounts }}
+            - name: CF_ACCOUNTS
+              value: {{ .Values.config.cfAccounts | quote }}
+            {{- end }}
+            {{- if .Values.config.cfZones }}
+            - name: CF_ZONES
+              value: {{ .Values.config.cfZones | quote }}
+            {{- end }}
+            {{- if .Values.config.cfFreeTierAccounts }}
+            - name: CF_FREE_TIER_ACCOUNTS
+              value: {{ .Values.config.cfFreeTierAccounts | quote }}
+            {{- end }}
+            {{- if .Values.config.metricsDenylist }}
+            - name: METRICS_DENYLIST
+              value: {{ .Values.config.metricsDenylist | quote }}
+            {{- end }}
+            {{- if .Values.config.hostMetricsAllowlist }}
+            - name: HOST_METRICS_ALLOWLIST
+              value: {{ .Values.config.hostMetricsAllowlist | quote }}
+            {{- end }}
+
+            # Timing and limits
+            - name: SCRAPE_DELAY_SECONDS
+              value: {{ .Values.config.scrapeDelaySeconds | quote }}
+            - name: METRIC_REFRESH_INTERVAL_SECONDS
+              value: {{ .Values.config.metricRefreshIntervalSeconds | quote }}
+            - name: TIME_WINDOW_SECONDS
+              value: {{ .Values.config.timeWindowSeconds | quote }}
+            - name: QUERY_LIMIT
+              value: {{ .Values.config.queryLimit | quote }}
+
+            # Cache TTLs
+            - name: ACCOUNT_LIST_CACHE_TTL_SECONDS
+              value: {{ .Values.config.accountListCacheTtlSeconds | quote }}
+            - name: ZONE_LIST_CACHE_TTL_SECONDS
+              value: {{ .Values.config.zoneListCacheTtlSeconds | quote }}
+            - name: SSL_CERTS_CACHE_TTL_SECONDS
+              value: {{ .Values.config.sslCertsCacheTtlSeconds | quote }}
+            - name: HEALTH_CHECK_CACHE_TTL_SECONDS
+              value: {{ .Values.config.healthCheckCacheTtlSeconds | quote }}
+            - name: HOST_METRICS_DELAY_SECONDS
+              value: {{ .Values.config.hostMetricsDelaySeconds | quote }}
+
+            # Feature flags
+            - name: METRICS_PATH
+              value: {{ .Values.config.metricsPath | quote }}
+            - name: EXCLUDE_HOST
+              value: {{ .Values.config.excludeHost | quote }}
+            - name: CF_HTTP_STATUS_GROUP
+              value: {{ .Values.config.cfHttpStatusGroup | quote }}
+            - name: DISABLE_UI
+              value: {{ .Values.config.disableUi | quote }}
+            - name: DISABLE_CONFIG_API
+              value: {{ .Values.config.disableConfigApi | quote }}
+
+            # Logging
+            - name: LOG_LEVEL
+              value: {{ .Values.config.logLevel | quote }}
+            - name: LOG_FORMAT
+              value: {{ .Values.config.logFormat | quote }}
+
+            {{- with .Values.extraEnv }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+
+          {{- with .Values.extraEnvFrom }}
+          envFrom:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+
+          {{- with .Values.livenessProbe }}
+          livenessProbe:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- with .Values.readinessProbe }}
+          readinessProbe:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+
+          {{- with .Values.resources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}

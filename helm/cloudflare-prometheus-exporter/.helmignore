@@ -1,0 +1,13 @@
+.DS_Store
+.git
+.gitignore
+.gitmodules
+*.swp
+*.bak
+*.tmp
+*.orig
+*~
+.project
+.idea/
+*.tmproj
+.vscode/

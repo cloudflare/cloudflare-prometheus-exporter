@@ -1,0 +1,17 @@
+apiVersion: v2
+name: cloudflare-prometheus-exporter
+description: Prometheus exporter for Cloudflare metrics (requests, bandwidth, WAF, Workers, Magic Transit, and more)
+type: application
+version: 0.1.0
+appVersion: "latest"
+keywords:
+  - cloudflare
+  - prometheus
+  - exporter
+  - monitoring
+  - observability
+home: https://github.com/stackdone/cloudflare-prometheus-exporter
+sources:
+  - https://github.com/stackdone/cloudflare-prometheus-exporter
+maintainers:
+  - name: stackdone
