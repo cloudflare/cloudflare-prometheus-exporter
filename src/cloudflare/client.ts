@@ -1526,6 +1526,8 @@ export class CloudflareMetricsClient {
 				return this.getSSLCertificateMetrics(zones);
 			case "lb-weight-metrics":
 				return this.getLbWeightMetrics(zones);
+			case "custom-hostname-ssl-status":
+				return this.getCustomHostnameSslStatusMetrics(zones);
 			default: {
 				const _exhaustive: never = query;
 				throw new Error(`Unknown zone metric query: ${_exhaustive}`);
@@ -3328,6 +3330,158 @@ export class CloudflareMetricsClient {
 		}
 
 		return certStatus.values.length > 0 ? [certStatus] : [];
+	}
+
+	/**
+	 * Fetches custom hostname SSL status counts for multiple zones.
+	 * Queries only non-active statuses to minimize API calls, then infers active count.
+	 */
+	private async getCustomHostnameSslStatusMetrics(
+		zones: Zone[],
+	): Promise<MetricDefinition[]> {
+		const results = await Promise.all(
+			zones.map((zone) =>
+				this.getCustomHostnameSslStatusMetricsForZone(zone).catch(() => {
+					this.logger.warn("Failed to fetch custom hostname SSL status", {
+						zone: zone.name,
+					});
+					return [] as MetricDefinition[];
+				}),
+			),
+		);
+		return results.flat();
+	}
+
+	/**
+	 * Fetches custom hostname SSL status counts for a single zone.
+	 * Queries non-active SSL statuses individually, infers active count from total.
+	 */
+	async getCustomHostnameSslStatusMetricsForZone(
+		zone: Zone,
+	): Promise<MetricDefinition[]> {
+		this.logger.info("Fetching custom hostname SSL status for zone", {
+			zone: zone.name,
+		});
+
+		const metric: MetricDefinition = {
+			name: "cloudflare_zone_custom_hostname_ssl_status_count",
+			help: "Number of custom hostnames by SSL status and certificate authority",
+			type: "gauge",
+			values: [],
+		};
+
+		const nonActiveStatuses = [
+			"pending_validation",
+			"pending_issuance",
+			"pending_deployment",
+			"validation_timed_out",
+			"deleted",
+			"initializing",
+		];
+
+		type ResultInfoWithTotal = { total_count?: number; page?: number; per_page?: number };
+
+		try {
+			// Get total count from first page of unfiltered request
+			const firstPage = await this.api.customHostnames.list({
+				zone_id: zone.id,
+				per_page: 1,
+			});
+			const totalCount = (firstPage.result_info as ResultInfoWithTotal)?.total_count ?? 0;
+
+			if (totalCount === 0) {
+				return [];
+			}
+
+			// Fetch counts for each non-active status
+			let nonActiveTotal = 0;
+			const caCounts: Record<string, Record<string, number>> = {};
+
+			for (const status of nonActiveStatuses) {
+				const response = await this.api.customHostnames.list({
+					zone_id: zone.id,
+					ssl: 1,
+					per_page: 50,
+					// @ts-expect-error -- ssl_status filter is supported but not in SDK types
+					ssl_status: status,
+				});
+
+				const statusCount = (response.result_info as ResultInfoWithTotal)?.total_count ?? 0;
+				if (statusCount === 0) continue;
+
+				// Count by CA from returned results
+				const caMap: Record<string, number> = {};
+				for (const hostname of response.result) {
+					const ssl = hostname.ssl as Record<string, unknown> | null;
+					const ca = (ssl?.certificate_authority as string) ?? "unknown";
+					caMap[ca] = (caMap[ca] ?? 0) + 1;
+				}
+
+				// If there are more results than the first page, paginate
+				if (statusCount > 50) {
+					let page = 2;
+					const totalPages = Math.ceil(statusCount / 50);
+					while (page <= totalPages) {
+						const nextPage = await this.api.customHostnames.list({
+							zone_id: zone.id,
+							ssl: 1,
+							per_page: 50,
+							page,
+							// @ts-expect-error -- ssl_status filter is supported but not in SDK types
+							ssl_status: status,
+						});
+						for (const hostname of nextPage.result) {
+							const ssl = hostname.ssl as Record<string, unknown> | null;
+							const ca = (ssl?.certificate_authority as string) ?? "unknown";
+							caMap[ca] = (caMap[ca] ?? 0) + 1;
+						}
+						page++;
+					}
+				}
+
+				nonActiveTotal += statusCount;
+
+				for (const [ca, count] of Object.entries(caMap)) {
+					if (!caCounts[status]) caCounts[status] = {};
+					caCounts[status][ca] = count;
+				}
+			}
+
+			// Emit non-active status metrics
+			for (const [status, cas] of Object.entries(caCounts)) {
+				for (const [ca, count] of Object.entries(cas)) {
+					metric.values.push({
+						labels: {
+							zone: zone.name,
+							ssl_status: status,
+							certificate_authority: ca,
+						},
+						value: count,
+					});
+				}
+			}
+
+			// Emit active count (total minus all non-active)
+			const activeCount = totalCount - nonActiveTotal;
+			if (activeCount > 0) {
+				metric.values.push({
+					labels: {
+						zone: zone.name,
+						ssl_status: "active",
+						certificate_authority: "all",
+					},
+					value: activeCount,
+				});
+			}
+		} catch (error) {
+			const msg = error instanceof Error ? error.message : String(error);
+			this.logger.warn("Failed to fetch custom hostname SSL status for zone", {
+				zone: zone.name,
+				error: msg,
+			});
+		}
+
+		return metric.values.length > 0 ? [metric] : [];
 	}
 
 	/**

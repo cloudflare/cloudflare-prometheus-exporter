@@ -452,6 +452,14 @@ All hostname metrics are **gauge snapshots** of the **last completed minute**, d
 |--------|------|--------|
 | `cloudflare_zone_certificate_validation_status` | gauge | zone, type, issuer, status |
 
+### Custom Hostname SSL Status Metrics
+
+| Metric | Type | Labels |
+|--------|------|--------|
+| `cloudflare_zone_custom_hostname_ssl_status_count` | gauge | zone, ssl_status, certificate_authority |
+
+Tracks the number of custom hostnames (Cloudflare for SaaS) grouped by SSL provisioning status and certificate authority. Non-active statuses (`pending_validation`, `pending_issuance`, `pending_deployment`, `validation_timed_out`, `deleted`, `initializing`) are queried individually to minimize API calls. Active count is inferred from the total. Requires **SSL and Certificates:Read** API token scope.
+
 ### Exporter Info Metrics
 
 | Metric | Type | Labels |
@@ -471,6 +479,7 @@ Zones on Cloudflare's Free plan don't have access to the GraphQL Analytics API. 
 **Free tier zones still export:**
 - `cloudflare_zone_certificate_validation_status` (SSL certificates)
 - `cloudflare_zone_lb_origin_weight` (Load balancer weights, if configured)
+- `cloudflare_zone_custom_hostname_ssl_status_count` (Custom hostname SSL status)
 
 **Monitor skipped zones:**
 ```

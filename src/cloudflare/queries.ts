@@ -31,6 +31,7 @@ export const MetricQueryNameSchema = z.enum([
 	// REST API
 	"ssl-certificates",
 	"lb-weight-metrics",
+	"custom-hostname-ssl-status",
 ]);
 
 /**
@@ -76,6 +77,7 @@ export const ZONE_LEVEL_QUERIES = [
 	"hostname-http-metrics",
 	"ssl-certificates",
 	"lb-weight-metrics",
+	"custom-hostname-ssl-status",
 ] as const;
 
 /**

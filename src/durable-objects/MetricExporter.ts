@@ -541,6 +541,8 @@ export class MetricExporter extends DurableObject<Env> {
 				return client.getSSLCertificateMetricsForZone(zoneMetadata);
 			case "lb-weight-metrics":
 				return client.getLbWeightMetricsForZone(zoneMetadata);
+			case "custom-hostname-ssl-status":
+				return client.getCustomHostnameSslStatusMetricsForZone(zoneMetadata);
 			default:
 				console.error("Unknown zone-scoped query", { queryName });
 				return [];
