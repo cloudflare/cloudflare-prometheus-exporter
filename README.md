@@ -62,7 +62,8 @@ Set in `wrangler.jsonc` or via `wrangler secret put`:
 | `CF_ACCOUNTS` | - | Comma-separated account IDs to include (default: all) |
 | `CF_ZONES` | - | Comma-separated zone IDs to include (default: all) |
 | `CF_FREE_TIER_ACCOUNTS` | - | Comma-separated account IDs using free tier (skips paid-tier metrics) |
-| `HOST_METRICS_ALLOWLIST` | - | Comma-separated hostnames for hostname-level metrics (max 50). Empty disables. Adds 2 extra GraphQL calls per account per refresh cycle. `EXCLUDE_HOST=true` also disables. |
+| `HOST_METRICS_ALLOWLIST` | - | Comma-separated hostnames for hostname-level metrics (max 50). Empty disables. Adds 1 extra GraphQL call per account per refresh cycle. `EXCLUDE_HOST=true` also disables. |
+| `HOST_METRICS_DELAY_SECONDS` | 60 | Ingestion delay for hostname metrics (seconds). Lower values = fresher data for alerting but risk incomplete data. Independent from `SCRAPE_DELAY_SECONDS`. |
 | `METRICS_PATH` | /metrics | Custom path for metrics endpoint |
 | `BASIC_AUTH_USER` | - | Username for basic auth (secret, default: no auth, requires `BASIC_AUTH_PASSWORD`) |
 | `BASIC_AUTH_PASSWORD` | - | Password for basic auth (secret, default: no auth, requires `BASIC_AUTH_USER`) |
@@ -156,6 +157,7 @@ Override configuration at runtime without redeployment. Overrides persist in KV 
 | `excludeHost` | boolean | Exclude host labels |
 | `httpStatusGroup` | boolean | Group HTTP status codes |
 | `hostMetricsAllowlist` | string | Comma-separated hostnames for hostname-level metrics |
+| `hostMetricsDelaySeconds` | number | Ingestion delay for hostname metrics (seconds) |
 
 ### Examples
 
@@ -418,15 +420,31 @@ Traffic volume metrics across Cloudflare's Network Analytics v2 datasets. All ar
 
 Requires `HOST_METRICS_ALLOWLIST` to be set (max 50 hostnames). Disabled when `EXCLUDE_HOST=true`.
 
-All hostname metrics are **gauge snapshots** over the lookback window (1h or 2h), not cumulative counters. The `window` label indicates the lookback period. Hosts with zero traffic in a window will not emit series for that window.
+All hostname metrics are **gauge snapshots** of the **last completed minute**, designed for alerting. The ingestion delay is controlled by `HOST_METRICS_DELAY_SECONDS` (default: 60s) independently from the global `SCRAPE_DELAY_SECONDS`. Hosts with zero traffic in the minute will not emit series.
+
+**Request counts:**
 
 | Metric | Type | Labels | Description |
 |--------|------|--------|-------------|
-| `cloudflare_zone_hostname_requests` | gauge | zone, host, window | Total requests in lookback window |
-| `cloudflare_zone_hostname_requests_by_status` | gauge | zone, host, status, window | Requests by HTTP status code (raw, e.g. 200/404/500) |
-| `cloudflare_zone_hostname_cache_status` | gauge | zone, host, cache_status, window | Requests by cache status (hit/miss/etc.) |
-| `cloudflare_zone_hostname_edge_ttfb_seconds` | gauge | zone, host, quantile, window | Edge TTFB in seconds (P50/P95 quantiles) |
-| `cloudflare_zone_hostname_origin_response_duration_seconds` | gauge | zone, host, quantile, window | Origin response duration in seconds (P50/P95 quantiles) |
+| `cloudflare_zone_hostname_requests` | gauge | zone, host | Total requests in the last completed minute |
+| `cloudflare_zone_hostname_requests_by_status` | gauge | zone, host, status | Requests by HTTP status code |
+| `cloudflare_zone_hostname_cache_status` | gauge | zone, host, cache_status | Requests by cache status (hit/miss/etc.) |
+
+**Latency (averages — primary alerting metrics):**
+
+| Metric | Type | Labels | Description |
+|--------|------|--------|-------------|
+| `cloudflare_zone_hostname_edge_ttfb_seconds` | gauge | zone, host | Average edge TTFB in seconds |
+| `cloudflare_zone_hostname_origin_response_duration_seconds` | gauge | zone, host | Average origin response duration in seconds |
+
+**Latency (percentiles — separate metric families):**
+
+| Metric | Type | Labels | Description |
+|--------|------|--------|-------------|
+| `cloudflare_zone_hostname_edge_ttfb_p50_seconds` | gauge | zone, host | P50 edge TTFB in seconds |
+| `cloudflare_zone_hostname_edge_ttfb_p95_seconds` | gauge | zone, host | P95 edge TTFB in seconds |
+| `cloudflare_zone_hostname_origin_response_duration_p50_seconds` | gauge | zone, host | P50 origin response duration in seconds |
+| `cloudflare_zone_hostname_origin_response_duration_p95_seconds` | gauge | zone, host | P95 origin response duration in seconds |
 
 ### SSL Certificate Metrics
 

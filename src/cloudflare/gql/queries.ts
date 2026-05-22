@@ -760,6 +760,10 @@ export const HostnameHttpMetricsQuery = graphql(`
           dimensions {
             clientRequestHTTPHost
           }
+          avg {
+            edgeTimeToFirstByteMs
+            originResponseDurationMs
+          }
           quantiles {
             edgeTimeToFirstByteMsP50
             edgeTimeToFirstByteMsP95

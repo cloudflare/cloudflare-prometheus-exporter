@@ -1034,6 +1034,48 @@ export const LandingPage: FC<Props> = ({ config }) => {
 												Hostnames for per-host metrics (max 50, empty disables)
 											</p>
 										</div>
+										<div>
+											<label
+												for="cfg-hostMetricsDelaySeconds"
+												class="block text-sm font-medium text-gray-700 mb-2"
+											>
+												Host Metrics Delay (seconds)
+											</label>
+											<div class="field-wrapper">
+												<input
+													type="number"
+													id="cfg-hostMetricsDelaySeconds"
+													class="config-input pr-8"
+													min="30"
+													onchange="onFieldChange('hostMetricsDelaySeconds', Number(this.value))"
+												/>
+												<button
+													type="button"
+													class="field-reset"
+													onclick="resetField('hostMetricsDelaySeconds')"
+													title="Reset to default"
+												>
+													<svg
+														class="w-4 h-4"
+														fill="none"
+														stroke="currentColor"
+														viewBox="0 0 24 24"
+														aria-hidden="true"
+													>
+														<path
+															stroke-linecap="round"
+															stroke-linejoin="round"
+															stroke-width="2"
+															d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"
+														/>
+													</svg>
+												</button>
+											</div>
+											<p class="text-xs text-gray-500 mt-1">
+												Ingestion delay for hostname metrics (lower = fresher
+												for alerting)
+											</p>
+										</div>
 									</div>
 								</div>
 

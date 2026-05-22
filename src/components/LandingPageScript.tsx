@@ -23,7 +23,7 @@ export const LandingPageScript: FC<Props> = ({
 				'queryLimit', 'scrapeDelaySeconds', 'timeWindowSeconds', 'metricRefreshIntervalSeconds',
 				'accountListCacheTtlSeconds', 'zoneListCacheTtlSeconds', 'sslCertsCacheTtlSeconds',
 				'logLevel', 'logFormat', 'cfAccounts', 'cfZones', 'cfFreeTierAccounts', 'metricsDenylist',
-				'excludeHost', 'httpStatusGroup', 'hostMetricsAllowlist'
+				'excludeHost', 'httpStatusGroup', 'hostMetricsAllowlist', 'hostMetricsDelaySeconds'
 			];
 
 			// Load config on page load
@@ -52,7 +52,8 @@ export const LandingPageScript: FC<Props> = ({
 			function populateForm() {
 				// Number fields
 				['queryLimit', 'scrapeDelaySeconds', 'timeWindowSeconds', 'metricRefreshIntervalSeconds',
-				 'accountListCacheTtlSeconds', 'zoneListCacheTtlSeconds', 'sslCertsCacheTtlSeconds'].forEach(key => {
+				 'accountListCacheTtlSeconds', 'zoneListCacheTtlSeconds', 'sslCertsCacheTtlSeconds',
+				 'hostMetricsDelaySeconds'].forEach(key => {
 					const el = document.getElementById('cfg-' + key);
 					if (el) el.value = localConfig[key] ?? '';
 				});

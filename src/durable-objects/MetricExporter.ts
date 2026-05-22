@@ -412,6 +412,7 @@ export class MetricExporter extends DurableObject<Env> {
 		if (isZoneLevelQuery(queryName)) {
 			// Hostname metrics guardrails: parse allowlist once for both guard + query
 			let hostMetricsAllowlist: ReadonlySet<string> | undefined;
+			let hostMetricsDelaySeconds: number | undefined;
 			if (queryName === "hostname-http-metrics") {
 				const parsed = parseCommaSeparated(config.hostMetricsAllowlist);
 				// Normalize to lowercase per spec
@@ -437,6 +438,7 @@ export class MetricExporter extends DurableObject<Env> {
 					return [];
 				}
 				hostMetricsAllowlist = normalized;
+				hostMetricsDelaySeconds = config.hostMetricsDelaySeconds;
 			}
 
 			// Filter out free tier zones for paid-tier GraphQL queries
@@ -472,6 +474,7 @@ export class MetricExporter extends DurableObject<Env> {
 					firewallRules,
 					timeRange,
 					hostMetricsAllowlist,
+					hostMetricsDelaySeconds,
 				);
 			}
 
@@ -488,6 +491,7 @@ export class MetricExporter extends DurableObject<Env> {
 						firewallRules,
 						timeRange,
 						hostMetricsAllowlist,
+						hostMetricsDelaySeconds,
 					);
 					chunkResults.push(metrics);
 				} catch (error) {

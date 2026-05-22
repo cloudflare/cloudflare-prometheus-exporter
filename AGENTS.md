@@ -85,7 +85,7 @@ src/
 
 **Counter accumulation:** Cloudflare returns window totals; DOs accumulate for Prometheus monotonic semantics
 
-**Hostname metrics:** Allowlist-based (`HOST_METRICS_ALLOWLIST`, max 50). All gauges (window snapshots). 1h + 2h lookback via `HostnameHttpMetricsQuery`. Hosts normalized to lowercase. Disabled when allowlist empty or `excludeHost=true`.
+**Hostname metrics:** Allowlist-based (`HOST_METRICS_ALLOWLIST`, max 50). All gauges, fixed 1-minute window for alerting. Avg latencies as primary metrics; P50/P95 as separate metric families (`_p50_seconds`, `_p95_seconds`). Ingestion delay controlled by `HOST_METRICS_DELAY_SECONDS` (default 60s), independent from global `SCRAPE_DELAY_SECONDS`. Hosts normalized to lowercase. Disabled when allowlist empty or `excludeHost=true`.
 
 ## COMMANDS
 

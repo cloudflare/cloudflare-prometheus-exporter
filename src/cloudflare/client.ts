@@ -11,6 +11,7 @@ import {
 	type LoggerConfig,
 } from "../lib/logger";
 import type { MetricDefinition } from "../lib/metrics";
+import { getEnvDefaults } from "../lib/runtime-config";
 import type {
 	Account,
 	LoadBalancerPool,
@@ -1467,6 +1468,7 @@ export class CloudflareMetricsClient {
 	 * @param firewallRules Map of firewall rule IDs to names.
 	 * @param timeRange Shared time range for query alignment.
 	 * @param hostMetricsAllowlist Allowed hostnames for hostname-http-metrics query.
+	 * @param hostMetricsDelaySeconds Ingestion delay override for hostname metrics.
 	 * @returns Promise of metric definitions for the zones.
 	 * @throws {Error} When unknown query type provided.
 	 */
@@ -1477,6 +1479,7 @@ export class CloudflareMetricsClient {
 		firewallRules: Record<string, string>,
 		timeRange: TimeRange,
 		hostMetricsAllowlist?: ReadonlySet<string>,
+		hostMetricsDelaySeconds?: number,
 	): Promise<MetricDefinition[]> {
 		this.logger.info("Fetching zone metrics", {
 			query,
@@ -1517,6 +1520,7 @@ export class CloudflareMetricsClient {
 					zones,
 					timeRange,
 					hostMetricsAllowlist,
+					hostMetricsDelaySeconds,
 				);
 			case "ssl-certificates":
 				return this.getSSLCertificateMetrics(zones);
@@ -2520,19 +2524,21 @@ export class CloudflareMetricsClient {
 
 	/**
 	 * Hostname-level HTTP metrics (requests, status, cache, latency) for allowlisted hosts.
-	 * Fetches two windows (1h, 2h) from the shared maxtime anchor.
+	 * Uses a fixed 1-minute window anchored by hostMetricsDelaySeconds for alerting-friendly resolution.
 	 *
 	 * @param zoneIds Zone IDs to query.
 	 * @param zones Zone metadata for label mapping.
 	 * @param anchor Shared time range providing the maxtime anchor.
 	 * @param allowlist Allowed hostnames; empty/undefined returns no metrics.
-	 * @returns Hostname metrics across both windows.
+	 * @param hostMetricsDelaySeconds Ingestion delay override for hostname metrics (default: use anchor).
+	 * @returns Hostname metrics for the last completed minute.
 	 */
 	private async getHostnameHttpMetrics(
 		zoneIds: string[],
 		zones: Zone[],
 		anchor: TimeRange,
 		allowlist: ReadonlySet<string> | undefined,
+		hostMetricsDelaySeconds?: number,
 	): Promise<MetricDefinition[]> {
 		if (!allowlist || allowlist.size === 0) {
 			this.logger.debug("Hostname metrics skipped: empty allowlist");
@@ -2540,128 +2546,95 @@ export class CloudflareMetricsClient {
 		}
 
 		const hosts = [...allowlist];
-		const maxtime = anchor.maxtime;
 
-		// Compute 1h and 2h lookback mintimes from the shared maxtime
+		// Compute 1-minute window with hostname-specific delay for alerting freshness.
+		// Round to minute boundary, then look back exactly 60s.
+		let maxtime: string;
+		if (hostMetricsDelaySeconds != null) {
+			const now = new Date();
+			now.setSeconds(0, 0);
+			now.setTime(now.getTime() - hostMetricsDelaySeconds * 1000);
+			maxtime = now.toISOString();
+		} else {
+			maxtime = anchor.maxtime;
+		}
 		const maxtimeMs = new Date(maxtime).getTime();
-		const mintime1h = new Date(maxtimeMs - 3_600_000).toISOString();
-		const mintime2h = new Date(maxtimeMs - 7_200_000).toISOString();
+		const mintime = new Date(maxtimeMs - 60_000).toISOString();
 
-		const [metrics1h, metrics2h] = await Promise.all([
-			this.getHostnameHttpMetricsWindow(
-				zoneIds,
-				zones,
-				hosts,
-				mintime1h,
-				maxtime,
-				"1h",
-			),
-			this.getHostnameHttpMetricsWindow(
-				zoneIds,
-				zones,
-				hosts,
-				mintime2h,
-				maxtime,
-				"2h",
-			),
-		]);
+		this.logger.debug("Hostname metrics time range", {
+			mintime,
+			maxtime,
+			delay: hostMetricsDelaySeconds ?? "anchor",
+			host_count: hosts.length,
+		});
 
-		// Merge metrics by name: combine values from both windows
-		const byName = new Map<string, MetricDefinition>();
-		for (const m of [...metrics1h, ...metrics2h]) {
-			const existing = byName.get(m.name);
-			if (existing) {
-				existing.values.push(...m.values);
-			} else {
-				byName.set(m.name, { ...m, values: [...m.values] });
-			}
-		}
-
-		// Log allowlisted hosts with no traffic in the 1h window at debug level.
-		// This fires every refresh cycle so must not be warn/info to avoid log spam.
-		const seenHosts = new Set<string>();
-		for (const m of metrics1h) {
-			for (const v of m.values) {
-				const host = v.labels.host;
-				if (host) seenHosts.add(host);
-			}
-		}
-		const missingHosts = hosts.filter((h) => !seenHosts.has(h));
-		if (missingHosts.length > 0) {
-			const MAX_LOGGED = 20;
-			const preview = missingHosts.slice(0, MAX_LOGGED);
-			this.logger.debug("Allowlisted hosts with no traffic in 1h window", {
-				missing_count: missingHosts.length,
-				missing_hosts: preview,
-				truncated: missingHosts.length > MAX_LOGGED,
-			});
-		}
-
-		return [...byName.values()];
-	}
-
-	/**
-	 * Fetches hostname metrics for a single time window.
-	 *
-	 * @param zoneIds Zone IDs to query.
-	 * @param zones Zone metadata for label mapping.
-	 * @param hosts Allowlisted hostnames.
-	 * @param mintime Start of window (ISO string).
-	 * @param maxtime End of window (ISO string).
-	 * @param windowLabel Window label for metric labels ("1h" or "2h").
-	 * @returns Hostname metrics for the window.
-	 */
-	private async getHostnameHttpMetricsWindow(
-		zoneIds: string[],
-		zones: Zone[],
-		hosts: readonly string[],
-		mintime: string,
-		maxtime: string,
-		windowLabel: "1h" | "2h",
-	): Promise<MetricDefinition[]> {
 		const result = await this.gql.query(HostnameHttpMetricsQuery, {
 			zoneIDs: zoneIds,
 			mintime,
 			maxtime,
 			limit: this.config.queryLimit,
-			hosts: [...hosts],
+			hosts,
 		});
 
 		if (result.error) {
 			throw new GraphQLError(
-				`Failed to fetch hostname metrics (${windowLabel})`,
+				"Failed to fetch hostname metrics",
 				result.error.graphQLErrors ?? [],
-				{ context: { zone_count: zoneIds.length, window: windowLabel } },
+				{ context: { zone_count: zoneIds.length } },
 			);
 		}
 
 		const hostnameRequests: MetricDefinition = {
 			name: "cloudflare_zone_hostname_requests",
-			help: "Total requests per hostname in lookback window (gauge snapshot, see window label)",
+			help: "Requests per hostname in the last completed minute",
 			type: "gauge",
 			values: [],
 		};
 		const hostnameStatus: MetricDefinition = {
 			name: "cloudflare_zone_hostname_requests_by_status",
-			help: "Requests per hostname by edge response status in lookback window",
+			help: "Requests per hostname by edge response status in the last completed minute",
 			type: "gauge",
 			values: [],
 		};
 		const hostnameCacheStatus: MetricDefinition = {
 			name: "cloudflare_zone_hostname_cache_status",
-			help: "Requests per hostname by cache status in lookback window",
+			help: "Requests per hostname by cache status in the last completed minute",
 			type: "gauge",
 			values: [],
 		};
 		const hostnameEdgeTtfb: MetricDefinition = {
 			name: "cloudflare_zone_hostname_edge_ttfb_seconds",
-			help: "Edge time to first byte per hostname in seconds (quantile over lookback window)",
+			help: "Average edge time to first byte per hostname in seconds (last completed minute)",
+			type: "gauge",
+			values: [],
+		};
+		const hostnameEdgeTtfbP50: MetricDefinition = {
+			name: "cloudflare_zone_hostname_edge_ttfb_p50_seconds",
+			help: "P50 edge time to first byte per hostname in seconds (last completed minute)",
+			type: "gauge",
+			values: [],
+		};
+		const hostnameEdgeTtfbP95: MetricDefinition = {
+			name: "cloudflare_zone_hostname_edge_ttfb_p95_seconds",
+			help: "P95 edge time to first byte per hostname in seconds (last completed minute)",
 			type: "gauge",
 			values: [],
 		};
 		const hostnameOriginDuration: MetricDefinition = {
 			name: "cloudflare_zone_hostname_origin_response_duration_seconds",
-			help: "Origin response duration per hostname in seconds (quantile over lookback window)",
+			help: "Average origin response duration per hostname in seconds (last completed minute)",
+			type: "gauge",
+			values: [],
+		};
+		const hostnameOriginDurationP50: MetricDefinition = {
+			name: "cloudflare_zone_hostname_origin_response_duration_p50_seconds",
+			help: "P50 origin response duration per hostname in seconds (last completed minute)",
+			type: "gauge",
+			values: [],
+		};
+		const hostnameOriginDurationP95: MetricDefinition = {
+			name: "cloudflare_zone_hostname_origin_response_duration_p95_seconds",
+			help: "P95 origin response duration per hostname in seconds (last completed minute)",
 			type: "gauge",
 			values: [],
 		};
@@ -2677,7 +2650,7 @@ export class CloudflareMetricsClient {
 				const count = group.count ?? 0;
 				if (count > 0) {
 					hostnameRequests.values.push({
-						labels: { zone: zoneName, host, window: windowLabel },
+						labels: { zone: zoneName, host },
 						value: count,
 					});
 				}
@@ -2696,7 +2669,6 @@ export class CloudflareMetricsClient {
 							zone: zoneName,
 							host,
 							status: String(status),
-							window: windowLabel,
 						},
 						value: count,
 					});
@@ -2716,49 +2688,63 @@ export class CloudflareMetricsClient {
 							zone: zoneName,
 							host,
 							cache_status: cacheStatus,
-							window: windowLabel,
 						},
 						value: count,
 					});
 				}
 			}
 
-			// Latency quantiles per host
+			// Latency per host: averages (primary alerting metric) + percentiles (separate families)
 			for (const group of zoneData.hostLatency ?? []) {
 				const host = (
 					group.dimensions?.clientRequestHTTPHost ?? ""
 				).toLowerCase();
+				const baseLabels = { zone: zoneName, host };
+
+				// Average latencies (ms → seconds) — primary alerting metrics
+				const avg = group.avg;
+				if (avg) {
+					if (avg.edgeTimeToFirstByteMs != null) {
+						hostnameEdgeTtfb.values.push({
+							labels: baseLabels,
+							value: avg.edgeTimeToFirstByteMs / 1000,
+						});
+					}
+					if (avg.originResponseDurationMs != null) {
+						hostnameOriginDuration.values.push({
+							labels: baseLabels,
+							value: avg.originResponseDurationMs / 1000,
+						});
+					}
+				}
+
+				// Percentile latencies (ms → seconds) — separate metric families
 				const q = group.quantiles;
-				if (!q) continue;
-
-				const baseLabels = { zone: zoneName, host, window: windowLabel };
-
-				// Edge TTFB (ms → seconds)
-				if (q.edgeTimeToFirstByteMsP50 != null) {
-					hostnameEdgeTtfb.values.push({
-						labels: { ...baseLabels, quantile: "P50" },
-						value: q.edgeTimeToFirstByteMsP50 / 1000,
-					});
-				}
-				if (q.edgeTimeToFirstByteMsP95 != null) {
-					hostnameEdgeTtfb.values.push({
-						labels: { ...baseLabels, quantile: "P95" },
-						value: q.edgeTimeToFirstByteMsP95 / 1000,
-					});
-				}
-
-				// Origin response duration (ms → seconds)
-				if (q.originResponseDurationMsP50 != null) {
-					hostnameOriginDuration.values.push({
-						labels: { ...baseLabels, quantile: "P50" },
-						value: q.originResponseDurationMsP50 / 1000,
-					});
-				}
-				if (q.originResponseDurationMsP95 != null) {
-					hostnameOriginDuration.values.push({
-						labels: { ...baseLabels, quantile: "P95" },
-						value: q.originResponseDurationMsP95 / 1000,
-					});
+				if (q) {
+					if (q.edgeTimeToFirstByteMsP50 != null) {
+						hostnameEdgeTtfbP50.values.push({
+							labels: baseLabels,
+							value: q.edgeTimeToFirstByteMsP50 / 1000,
+						});
+					}
+					if (q.edgeTimeToFirstByteMsP95 != null) {
+						hostnameEdgeTtfbP95.values.push({
+							labels: baseLabels,
+							value: q.edgeTimeToFirstByteMsP95 / 1000,
+						});
+					}
+					if (q.originResponseDurationMsP50 != null) {
+						hostnameOriginDurationP50.values.push({
+							labels: baseLabels,
+							value: q.originResponseDurationMsP50 / 1000,
+						});
+					}
+					if (q.originResponseDurationMsP95 != null) {
+						hostnameOriginDurationP95.values.push({
+							labels: baseLabels,
+							value: q.originResponseDurationMsP95 / 1000,
+						});
+					}
 				}
 			}
 
@@ -2777,10 +2763,26 @@ export class CloudflareMetricsClient {
 						alias: alias.name,
 						returned: alias.len,
 						limit,
-						window: windowLabel,
 					});
 				}
 			}
+		}
+
+		// Log allowlisted hosts with no traffic at debug level
+		const seenHosts = new Set<string>();
+		for (const v of hostnameRequests.values) {
+			const host = v.labels.host;
+			if (host) seenHosts.add(host);
+		}
+		const missingHosts = hosts.filter((h) => !seenHosts.has(h));
+		if (missingHosts.length > 0) {
+			const MAX_LOGGED = 20;
+			const preview = missingHosts.slice(0, MAX_LOGGED);
+			this.logger.debug("Allowlisted hosts with no traffic in 1m window", {
+				missing_count: missingHosts.length,
+				missing_hosts: preview,
+				truncated: missingHosts.length > MAX_LOGGED,
+			});
 		}
 
 		return [
@@ -2788,7 +2790,11 @@ export class CloudflareMetricsClient {
 			hostnameStatus,
 			hostnameCacheStatus,
 			hostnameEdgeTtfb,
+			hostnameEdgeTtfbP50,
+			hostnameEdgeTtfbP95,
 			hostnameOriginDuration,
+			hostnameOriginDurationP50,
+			hostnameOriginDurationP95,
 		].filter((m) => m.values.length > 0);
 	}
 
@@ -3439,11 +3445,15 @@ export function getCloudflareMetricsClient(env: Env): CloudflareMetricsClient {
 
 	const loggerConfig = configFromEnv(env);
 	const logger = createLogger("cf_client_singleton", loggerConfig);
+	const defaults = getEnvDefaults(env);
 
 	logger.info("Creating CloudflareMetricsClient singleton", {
 		rate_limit: "200/10s",
 		log_level: loggerConfig.level,
 		log_format: loggerConfig.format,
+		query_limit: defaults.queryLimit,
+		scrape_delay_seconds: defaults.scrapeDelaySeconds,
+		time_window_seconds: defaults.timeWindowSeconds,
 	});
 
 	const rateLimitedFetch = createRateLimitedFetch(
@@ -3453,9 +3463,9 @@ export function getCloudflareMetricsClient(env: Env): CloudflareMetricsClient {
 
 	const client = new CloudflareMetricsClient({
 		apiToken: env.CLOUDFLARE_API_TOKEN,
-		scrapeDelaySeconds: env.SCRAPE_DELAY_SECONDS,
-		timeWindowSeconds: env.TIME_WINDOW_SECONDS,
-		queryLimit: env.QUERY_LIMIT,
+		scrapeDelaySeconds: defaults.scrapeDelaySeconds,
+		timeWindowSeconds: defaults.timeWindowSeconds,
+		queryLimit: defaults.queryLimit,
 		loggerConfig,
 		fetch: rateLimitedFetch,
 	});

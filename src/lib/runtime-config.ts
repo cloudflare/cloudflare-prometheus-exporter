@@ -30,6 +30,7 @@ export const ConfigKeySchema = z.enum([
 	"httpStatusGroup",
 	// Hostname metrics
 	"hostMetricsAllowlist",
+	"hostMetricsDelaySeconds",
 ]);
 
 /**
@@ -58,6 +59,7 @@ const ConfigValueSchemas = {
 	excludeHost: z.boolean(),
 	httpStatusGroup: z.boolean(),
 	hostMetricsAllowlist: z.string(),
+	hostMetricsDelaySeconds: z.number().int().min(30),
 } as const;
 
 /**
@@ -87,6 +89,8 @@ export const ConfigOverridesSchema = z
 		excludeHost: ConfigValueSchemas.excludeHost.optional(),
 		httpStatusGroup: ConfigValueSchemas.httpStatusGroup.optional(),
 		hostMetricsAllowlist: ConfigValueSchemas.hostMetricsAllowlist.optional(),
+		hostMetricsDelaySeconds:
+			ConfigValueSchemas.hostMetricsDelaySeconds.optional(),
 	})
 	.readonly();
 
@@ -118,6 +122,7 @@ export const ResolvedConfigSchema = z
 		excludeHost: ConfigValueSchemas.excludeHost,
 		httpStatusGroup: ConfigValueSchemas.httpStatusGroup,
 		hostMetricsAllowlist: ConfigValueSchemas.hostMetricsAllowlist,
+		hostMetricsDelaySeconds: ConfigValueSchemas.hostMetricsDelaySeconds,
 	})
 	.readonly();
 
@@ -191,6 +196,10 @@ export function getEnvDefaults(env: Env): ResolvedConfig {
 			.catch(false)
 			.parse(env.CF_HTTP_STATUS_GROUP),
 		hostMetricsAllowlist: optionalEnv.HOST_METRICS_ALLOWLIST?.trim() ?? "",
+		hostMetricsDelaySeconds: z.coerce
+			.number()
+			.catch(60)
+			.parse(env.HOST_METRICS_DELAY_SECONDS),
 	};
 }
 
@@ -278,6 +287,8 @@ function mergeConfig(
 		httpStatusGroup: overrides.httpStatusGroup ?? defaults.httpStatusGroup,
 		hostMetricsAllowlist:
 			overrides.hostMetricsAllowlist ?? defaults.hostMetricsAllowlist,
+		hostMetricsDelaySeconds:
+			overrides.hostMetricsDelaySeconds ?? defaults.hostMetricsDelaySeconds,
 	};
 }
 

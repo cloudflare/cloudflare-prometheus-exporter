@@ -1,0 +1,66 @@
+name: Publish release artifacts
+
+on:
+  release:
+    types: [published]
+
+concurrency:
+  group: release-${{ github.event.release.tag_name }}
+  cancel-in-progress: true
+
+permissions:
+  contents: write
+
+jobs:
+  build-and-upload:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - name: Install Bun
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Patch KV namespace ID for dry-run build
+        run: |
+          # Replace any KV id value (empty or populated) with a placeholder.
+          # --dry-run never deploys, so the actual ID doesn't matter.
+          sed -i '/kv_namespaces/,/\]/ s/"id": ".*"/"id": "placeholder"/' wrangler.jsonc
+          grep -q '"id": "placeholder"' wrangler.jsonc || { echo "::error::KV ID patch failed"; exit 1; }
+
+      - name: Build worker
+        run: |
+          npx wrangler deploy --dry-run --outdir dist
+          ls dist/*.js || { echo "::error::Build produced no JS output"; exit 1; }
+
+      - name: Generate dist README
+        env:
+          TAG_NAME: ${{ github.event.release.tag_name }}
+        run: |
+          cat > dist/README.md <<EOF
+          # cloudflare-prometheus-exporter ${TAG_NAME}
+
+          Built from commit ${{ github.sha }} on $(date -u +%Y-%m-%dT%H:%M:%SZ).
+
+          Deploy with your own \`wrangler.jsonc\` containing KV namespace IDs,
+          Durable Object bindings, and environment variables.
+          EOF
+
+      - name: Package dist
+        env:
+          TAG_NAME: ${{ github.event.release.tag_name }}
+        run: |
+          zip -r "cloudflare-prometheus-exporter-${TAG_NAME}.zip" dist/
+
+      - name: Upload release artifact
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG_NAME: ${{ github.event.release.tag_name }}
+        run: |
+          # --clobber allows re-running the workflow on the same release
+          gh release upload "${TAG_NAME}" \
+            "cloudflare-prometheus-exporter-${TAG_NAME}.zip" \
+            --clobber
