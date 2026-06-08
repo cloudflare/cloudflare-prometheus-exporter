@@ -465,34 +465,36 @@ export class MetricExporter extends DurableObject<Env> {
 			// Chunk zones and merge results to support accounts with >10 zones.
 			const ZONES_PER_CHUNK = 10;
 
-			if (zonesToQuery.length <= ZONES_PER_CHUNK) {
-				const zoneIds = zonesToQuery.map((z) => z.id);
-				return client.getZoneMetrics(
+		if (zonesToQuery.length <= ZONES_PER_CHUNK) {
+			const zoneIds = zonesToQuery.map((z) => z.id);
+			return client.getZoneMetrics(
+				queryName,
+				accountId,
+				zoneIds,
+				zonesToQuery,
+				firewallRules,
+				timeRange,
+				hostMetricsAllowlist,
+				hostMetricsDelaySeconds,
+			);
+		}
+
+		const chunkResults: MetricDefinition[][] = [];
+		for (let i = 0; i < zonesToQuery.length; i += ZONES_PER_CHUNK) {
+			const chunkZones = zonesToQuery.slice(i, i + ZONES_PER_CHUNK);
+			const chunkIds = chunkZones.map((z) => z.id);
+
+			try {
+				const metrics = await client.getZoneMetrics(
 					queryName,
-					zoneIds,
-					zonesToQuery,
+					accountId,
+					chunkIds,
+					chunkZones,
 					firewallRules,
 					timeRange,
 					hostMetricsAllowlist,
 					hostMetricsDelaySeconds,
 				);
-			}
-
-			const chunkResults: MetricDefinition[][] = [];
-			for (let i = 0; i < zonesToQuery.length; i += ZONES_PER_CHUNK) {
-				const chunkZones = zonesToQuery.slice(i, i + ZONES_PER_CHUNK);
-				const chunkIds = chunkZones.map((z) => z.id);
-
-				try {
-					const metrics = await client.getZoneMetrics(
-						queryName,
-						chunkIds,
-						chunkZones,
-						firewallRules,
-						timeRange,
-						hostMetricsAllowlist,
-						hostMetricsDelaySeconds,
-					);
 					chunkResults.push(metrics);
 				} catch (error) {
 					// Log and continue — partial results from other chunks are still valuable.

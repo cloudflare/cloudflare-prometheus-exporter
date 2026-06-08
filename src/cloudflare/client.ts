@@ -205,6 +205,7 @@ export class CloudflareMetricsClient {
 				return {
 					headers: {
 						authorization: `Bearer ${config.apiToken}`,
+						"X-Rate-Limit-Type": "account-based",
 					},
 				};
 			},
@@ -226,8 +227,9 @@ export class CloudflareMetricsClient {
 	 * @param input HTTP metrics input parameters.
 	 * @returns Promise of raw GraphQL query result.
 	 */
-	async getHttpMetrics(input: HttpMetricsInput) {
+	async getHttpMetrics(accountId: string, input: HttpMetricsInput) {
 		const result = await this.gql.query(HTTPMetricsQuery, {
+			accountID: accountId,
 			limit: input.limit,
 			maxtime: input.maxtime.toISOString(),
 			mintime: input.mintime.toISOString(),
@@ -642,6 +644,7 @@ export class CloudflareMetricsClient {
 				}
 			}
 		}
+		}
 
 		if (requestsMetric.values.length > 0) metrics.push(requestsMetric);
 		if (errorsMetric.values.length > 0) metrics.push(errorsMetric);
@@ -695,6 +698,7 @@ export class CloudflareMetricsClient {
 					value: group.count ?? 0,
 				});
 			}
+		}
 		}
 
 		return metric.values.length > 0 ? [metric] : [];
@@ -877,6 +881,7 @@ export class CloudflareMetricsClient {
 				}
 			}
 		}
+		}
 
 		return [
 			activeTunnels,
@@ -1017,6 +1022,7 @@ export class CloudflareMetricsClient {
 				}
 			}
 		}
+		}
 
 		return [sloStatus, effectiveSlo, targetSlo].filter(
 			(m) => m.values.length > 0,
@@ -1084,6 +1090,7 @@ export class CloudflareMetricsClient {
 				packets.values.push({ labels, value: group.sum?.packets ?? 0 });
 			}
 		}
+		}
 
 		return [bits, packets].filter((m) => m.values.length > 0);
 	}
@@ -1145,6 +1152,7 @@ export class CloudflareMetricsClient {
 				bits.values.push({ labels, value: group.sum?.bits ?? 0 });
 				packets.values.push({ labels, value: group.sum?.packets ?? 0 });
 			}
+		}
 		}
 
 		return [bits, packets].filter((m) => m.values.length > 0);
@@ -1244,6 +1252,7 @@ export class CloudflareMetricsClient {
 				normalizedAccount,
 				metrics,
 			);
+		}
 		}
 
 		return metrics.filter((m) => m.values.length > 0);
@@ -1371,6 +1380,7 @@ export class CloudflareMetricsClient {
 				});
 			}
 		}
+		}
 		return [playbackCount, secondsViewed].filter((m) => m.values.length > 0);
 	}
 
@@ -1452,6 +1462,7 @@ export class CloudflareMetricsClient {
 				});
 			}
 		}
+		}
 
 		return [segments, bitRate, gopDuration, uploadRatio].filter(
 			(m) => m.values.length > 0,
@@ -1474,6 +1485,7 @@ export class CloudflareMetricsClient {
 	 */
 	async getZoneMetrics(
 		query: ZoneLevelQuery,
+		accountId: string,
 		zoneIds: string[],
 		zones: Zone[],
 		firewallRules: Record<string, string>,
@@ -1495,25 +1507,25 @@ export class CloudflareMetricsClient {
 					timeRange,
 				);
 			case "adaptive-metrics":
-				return this.getAdaptiveMetrics(zoneIds, zones, timeRange);
+				return this.getAdaptiveMetrics(accountId, zoneIds, zones, timeRange);
 			case "edge-country-metrics":
-				return this.getEdgeCountryMetrics(zoneIds, zones, timeRange);
+				return this.getEdgeCountryMetrics(accountId, zoneIds, zones, timeRange);
 			case "colo-metrics":
-				return this.getColoMetrics(zoneIds, zones, timeRange);
+				return this.getColoMetrics(accountId, zoneIds, zones, timeRange);
 			case "colo-error-metrics":
-				return this.getColoErrorMetrics(zoneIds, zones, timeRange);
+				return this.getColoErrorMetrics(accountId, zoneIds, zones, timeRange);
 			case "request-method-metrics":
-				return this.getRequestMethodMetrics(zoneIds, zones, timeRange);
+				return this.getRequestMethodMetrics(accountId, zoneIds, zones, timeRange);
 			case "health-check-metrics":
-				return this.getHealthCheckMetrics(zoneIds, zones, timeRange);
+				return this.getHealthCheckMetrics(accountId, zoneIds, zones, timeRange);
 			case "load-balancer-metrics":
-				return this.getLoadBalancerMetrics(zoneIds, zones, timeRange);
+				return this.getLoadBalancerMetrics(accountId, zoneIds, zones, timeRange);
 			case "logpush-zone":
-				return this.getLogpushZoneMetrics(zoneIds, zones, timeRange);
+				return this.getLogpushZoneMetrics(accountId, zoneIds, zones, timeRange);
 			case "origin-status-metrics":
-				return this.getOriginStatusMetrics(zoneIds, zones, timeRange);
+				return this.getOriginStatusMetrics(accountId, zoneIds, zones, timeRange);
 			case "cache-miss-metrics":
-				return this.getCacheMissMetrics(zoneIds, zones, timeRange);
+				return this.getCacheMissMetrics(accountId, zoneIds, zones, timeRange);
 			case "hostname-http-metrics":
 				return this.getHostnameHttpMetrics(
 					zoneIds,
@@ -1545,12 +1557,14 @@ export class CloudflareMetricsClient {
 	 * @throws {Error} When GraphQL query fails.
 	 */
 	private async getHttpMetricsHandler(
+		accountId: string,
 		zoneIds: string[],
 		zones: Zone[],
 		firewallRules: Map<string, string>,
 		timeRange: TimeRange,
 	): Promise<MetricDefinition[]> {
 		const queryVars = {
+			accountID: accountId,
 			zoneIDs: zoneIds,
 			mintime: timeRange.mintime,
 			maxtime: timeRange.maxtime,
@@ -1740,7 +1754,8 @@ export class CloudflareMetricsClient {
 			values: [],
 		};
 
-		for (const zoneData of result.data?.viewer?.zones ?? []) {
+		for (const accountData of result.data?.viewer?.accounts ?? []) {
+		for (const zoneData of accountData.zones ?? []) {
 			const zoneName = findZoneName(zoneData.zoneTag, zones);
 			const baseLabels = { zone: zoneName };
 
@@ -1948,6 +1963,7 @@ export class CloudflareMetricsClient {
 				}
 			}
 		}
+		}
 
 		// Return only non-empty metrics
 		return [
@@ -1988,11 +2004,13 @@ export class CloudflareMetricsClient {
 	 * @throws {Error} When GraphQL query fails.
 	 */
 	private async getAdaptiveMetrics(
+		accountId: string,
 		zoneIds: string[],
 		zones: Zone[],
 		timeRange: TimeRange,
 	): Promise<MetricDefinition[]> {
 		const result = await this.gql.query(AdaptiveMetricsQuery, {
+			accountID: accountId,
 			zoneIDs: zoneIds,
 			mintime: timeRange.mintime,
 			maxtime: timeRange.maxtime,
@@ -2032,7 +2050,8 @@ export class CloudflareMetricsClient {
 		const zoneStats: Record<string, { errors4xx: number; errors5xx: number }> =
 			{};
 
-		for (const zoneData of result.data?.viewer?.zones ?? []) {
+		for (const accountData of result.data?.viewer?.accounts ?? []) {
+		for (const zoneData of accountData.zones ?? []) {
 			const zoneName = findZoneName(zoneData.zoneTag, zones);
 
 			for (const group of zoneData.httpRequestsAdaptiveGroups ?? []) {
@@ -2067,6 +2086,7 @@ export class CloudflareMetricsClient {
 				}
 			}
 		}
+		}
 
 		// Emit origin error rate (ratio of 5xx to total errors)
 		for (const [zone, stats] of Object.entries(zoneStats)) {
@@ -2094,11 +2114,13 @@ export class CloudflareMetricsClient {
 	 * @throws {Error} When GraphQL query fails.
 	 */
 	private async getEdgeCountryMetrics(
+		accountId: string,
 		zoneIds: string[],
 		zones: Zone[],
 		timeRange: TimeRange,
 	): Promise<MetricDefinition[]> {
 		const result = await this.gql.query(EdgeCountryMetricsQuery, {
+			accountID: accountId,
 			zoneIDs: zoneIds,
 			mintime: timeRange.mintime,
 			maxtime: timeRange.maxtime,
@@ -2126,7 +2148,8 @@ export class CloudflareMetricsClient {
 		// Aggregate for error rate calculation
 		const zoneStats: Record<string, { total: number; errors: number }> = {};
 
-		for (const zoneData of result.data?.viewer?.zones ?? []) {
+		for (const accountData of result.data?.viewer?.accounts ?? []) {
+		for (const zoneData of accountData.zones ?? []) {
 			const zoneName = findZoneName(zoneData.zoneTag, zones);
 
 			for (const group of zoneData.httpRequestsEdgeCountryHost ?? []) {
@@ -2156,6 +2179,7 @@ export class CloudflareMetricsClient {
 				}
 			}
 		}
+		}
 
 		// Emit error rate gauges
 		for (const [zone, stats] of Object.entries(zoneStats)) {
@@ -2182,11 +2206,13 @@ export class CloudflareMetricsClient {
 	 * @throws {Error} When GraphQL query fails.
 	 */
 	private async getColoMetrics(
+		accountId: string,
 		zoneIds: string[],
 		zones: Zone[],
 		timeRange: TimeRange,
 	): Promise<MetricDefinition[]> {
 		const result = await this.gql.query(ColoMetricsQuery, {
+			accountID: accountId,
 			zoneIDs: zoneIds,
 			mintime: timeRange.mintime,
 			maxtime: timeRange.maxtime,
@@ -2216,7 +2242,8 @@ export class CloudflareMetricsClient {
 			values: [],
 		};
 
-		for (const zoneData of result.data?.viewer?.zones ?? []) {
+		for (const accountData of result.data?.viewer?.accounts ?? []) {
+		for (const zoneData of accountData.zones ?? []) {
 			const zoneName = findZoneName(zoneData.zoneTag, zones);
 
 			for (const group of zoneData.httpRequestsAdaptiveGroups ?? []) {
@@ -2242,6 +2269,7 @@ export class CloudflareMetricsClient {
 				}
 			}
 		}
+		}
 
 		return [visits, responseBytes, requestsTotal].filter(
 			(m) => m.values.length > 0,
@@ -2258,11 +2286,13 @@ export class CloudflareMetricsClient {
 	 * @throws {Error} When GraphQL query fails.
 	 */
 	private async getColoErrorMetrics(
+		accountId: string,
 		zoneIds: string[],
 		zones: Zone[],
 		timeRange: TimeRange,
 	): Promise<MetricDefinition[]> {
 		const result = await this.gql.query(ColoErrorMetricsQuery, {
+			accountID: accountId,
 			zoneIDs: zoneIds,
 			mintime: timeRange.mintime,
 			maxtime: timeRange.maxtime,
@@ -2292,7 +2322,8 @@ export class CloudflareMetricsClient {
 			values: [],
 		};
 
-		for (const zoneData of result.data?.viewer?.zones ?? []) {
+		for (const accountData of result.data?.viewer?.accounts ?? []) {
+		for (const zoneData of accountData.zones ?? []) {
 			const zoneName = findZoneName(zoneData.zoneTag, zones);
 
 			for (const group of zoneData.httpRequestsAdaptiveGroups ?? []) {
@@ -2319,6 +2350,7 @@ export class CloudflareMetricsClient {
 				}
 			}
 		}
+		}
 
 		return [visitsError, responseBytesError, requestsError].filter(
 			(m) => m.values.length > 0,
@@ -2335,11 +2367,13 @@ export class CloudflareMetricsClient {
 	 * @throws {Error} When GraphQL query fails.
 	 */
 	private async getRequestMethodMetrics(
+		accountId: string,
 		zoneIds: string[],
 		zones: Zone[],
 		timeRange: TimeRange,
 	): Promise<MetricDefinition[]> {
 		const result = await this.gql.query(RequestMethodMetricsQuery, {
+			accountID: accountId,
 			zoneIDs: zoneIds,
 			mintime: timeRange.mintime,
 			maxtime: timeRange.maxtime,
@@ -2357,7 +2391,8 @@ export class CloudflareMetricsClient {
 			values: [],
 		};
 
-		for (const zoneData of result.data?.viewer?.zones ?? []) {
+		for (const accountData of result.data?.viewer?.accounts ?? []) {
+		for (const zoneData of accountData.zones ?? []) {
 			const zoneName = findZoneName(zoneData.zoneTag, zones);
 
 			for (const group of zoneData.httpRequestsAdaptiveGroups ?? []) {
@@ -2371,6 +2406,7 @@ export class CloudflareMetricsClient {
 					});
 				}
 			}
+		}
 		}
 
 		return methodCount.values.length > 0 ? [methodCount] : [];
@@ -2386,11 +2422,13 @@ export class CloudflareMetricsClient {
 	 * @throws {GraphQLError} When GraphQL query fails.
 	 */
 	private async getHealthCheckMetrics(
+		accountId: string,
 		zoneIds: string[],
 		zones: Zone[],
 		timeRange: TimeRange,
 	): Promise<MetricDefinition[]> {
 		const result = await this.gql.query(HealthCheckMetricsQuery, {
+			accountID: accountId,
 			zoneIDs: zoneIds,
 			mintime: timeRange.mintime,
 			maxtime: timeRange.maxtime,
@@ -2442,7 +2480,8 @@ export class CloudflareMetricsClient {
 			values: [],
 		};
 
-		for (const zoneData of result.data?.viewer?.zones ?? []) {
+		for (const accountData of result.data?.viewer?.accounts ?? []) {
+		for (const zoneData of accountData.zones ?? []) {
 			const zoneName = findZoneName(zoneData.zoneTag, zones);
 			let totalEvents = 0;
 			let groupCount = 0;
@@ -2511,6 +2550,7 @@ export class CloudflareMetricsClient {
 				});
 			}
 		}
+		}
 
 		return [
 			eventsOrigin,
@@ -2534,6 +2574,7 @@ export class CloudflareMetricsClient {
 	 * @returns Hostname metrics for the last completed minute.
 	 */
 	private async getHostnameHttpMetrics(
+		accountId: string,
 		zoneIds: string[],
 		zones: Zone[],
 		anchor: TimeRange,
@@ -2569,6 +2610,7 @@ export class CloudflareMetricsClient {
 		});
 
 		const result = await this.gql.query(HostnameHttpMetricsQuery, {
+			accountID: accountId,
 			zoneIDs: zoneIds,
 			mintime,
 			maxtime,
@@ -2639,7 +2681,8 @@ export class CloudflareMetricsClient {
 			values: [],
 		};
 
-		for (const zoneData of result.data?.viewer?.zones ?? []) {
+		for (const accountData of result.data?.viewer?.accounts ?? []) {
+		for (const zoneData of accountData.zones ?? []) {
 			const zoneName = findZoneName(zoneData.zoneTag, zones);
 
 			// Total requests per host
@@ -2767,6 +2810,7 @@ export class CloudflareMetricsClient {
 				}
 			}
 		}
+		}
 
 		// Log allowlisted hosts with no traffic at debug level
 		const seenHosts = new Set<string>();
@@ -2808,11 +2852,13 @@ export class CloudflareMetricsClient {
 	 * @throws {GraphQLError} When GraphQL query fails.
 	 */
 	private async getLoadBalancerMetrics(
+		accountId: string,
 		zoneIds: string[],
 		zones: Zone[],
 		timeRange: TimeRange,
 	): Promise<MetricDefinition[]> {
 		const result = await this.gql.query(LoadBalancerMetricsQuery, {
+			accountID: accountId,
 			zoneIDs: zoneIds,
 			mintime: timeRange.mintime,
 			maxtime: timeRange.maxtime,
@@ -2861,7 +2907,8 @@ export class CloudflareMetricsClient {
 		// Track seen policies to dedupe info metric
 		const seenPolicies = new Set<string>();
 
-		for (const zoneData of result.data?.viewer?.zones ?? []) {
+		for (const accountData of result.data?.viewer?.accounts ?? []) {
+		for (const zoneData of accountData.zones ?? []) {
 			const zoneName = findZoneName(zoneData.zoneTag, zones);
 
 			// Pool requests, RTT, steering policy, origins selected from groups
@@ -2919,6 +2966,7 @@ export class CloudflareMetricsClient {
 						});
 					}
 				}
+		}
 			}
 
 			// Pool health from adaptive
@@ -2955,11 +3003,13 @@ export class CloudflareMetricsClient {
 	 * @throws {Error} When GraphQL query fails.
 	 */
 	private async getLogpushZoneMetrics(
+		accountId: string,
 		zoneIds: string[],
 		zones: Zone[],
 		timeRange: TimeRange,
 	): Promise<MetricDefinition[]> {
 		const result = await this.gql.query(LogpushZoneMetricsQuery, {
+			accountID: accountId,
 			zoneIDs: zoneIds,
 			mintime: timeRange.mintime,
 			maxtime: timeRange.maxtime,
@@ -2977,7 +3027,8 @@ export class CloudflareMetricsClient {
 			values: [],
 		};
 
-		for (const zoneData of result.data?.viewer?.zones ?? []) {
+		for (const accountData of result.data?.viewer?.accounts ?? []) {
+		for (const zoneData of accountData.zones ?? []) {
 			const zoneName = findZoneName(zoneData.zoneTag, zones);
 
 			for (const group of zoneData.logpushHealthAdaptiveGroups ?? []) {
@@ -2994,6 +3045,7 @@ export class CloudflareMetricsClient {
 				}
 			}
 		}
+		}
 
 		return failedJobs.values.length > 0 ? [failedJobs] : [];
 	}
@@ -3008,11 +3060,13 @@ export class CloudflareMetricsClient {
 	 * @throws {Error} When GraphQL query fails.
 	 */
 	private async getOriginStatusMetrics(
+		accountId: string,
 		zoneIds: string[],
 		zones: Zone[],
 		timeRange: TimeRange,
 	): Promise<MetricDefinition[]> {
 		const result = await this.gql.query(OriginStatusMetricsQuery, {
+			accountID: accountId,
 			zoneIDs: zoneIds,
 			mintime: timeRange.mintime,
 			maxtime: timeRange.maxtime,
@@ -3030,7 +3084,8 @@ export class CloudflareMetricsClient {
 			values: [],
 		};
 
-		for (const zoneData of result.data?.viewer?.zones ?? []) {
+		for (const accountData of result.data?.viewer?.accounts ?? []) {
+		for (const zoneData of accountData.zones ?? []) {
 			const zoneName = findZoneName(zoneData.zoneTag, zones);
 
 			for (const group of zoneData.httpRequestsAdaptiveGroups ?? []) {
@@ -3049,6 +3104,7 @@ export class CloudflareMetricsClient {
 				}
 			}
 		}
+		}
 
 		return originStatusCountryHost.values.length > 0
 			? [originStatusCountryHost]
@@ -3065,11 +3121,13 @@ export class CloudflareMetricsClient {
 	 * @throws {GraphQLError} When GraphQL query fails.
 	 */
 	private async getCacheMissMetrics(
+		accountId: string,
 		zoneIds: string[],
 		zones: Zone[],
 		timeRange: TimeRange,
 	): Promise<MetricDefinition[]> {
 		const result = await this.gql.query(CacheMissMetricsQuery, {
+			accountID: accountId,
 			zoneIDs: zoneIds,
 			mintime: timeRange.mintime,
 			maxtime: timeRange.maxtime,
@@ -3091,7 +3149,8 @@ export class CloudflareMetricsClient {
 			values: [],
 		};
 
-		for (const zoneData of result.data?.viewer?.zones ?? []) {
+		for (const accountData of result.data?.viewer?.accounts ?? []) {
+		for (const zoneData of accountData.zones ?? []) {
 			const zoneName = findZoneName(zoneData.zoneTag, zones);
 
 			for (const group of zoneData.httpRequestsAdaptiveGroups ?? []) {
@@ -3110,6 +3169,7 @@ export class CloudflareMetricsClient {
 					});
 				}
 			}
+		}
 		}
 
 		return cacheMissDuration.values.length > 0 ? [cacheMissDuration] : [];

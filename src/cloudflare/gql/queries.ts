@@ -2,83 +2,86 @@ import { graphql } from "./client";
 
 export const HTTPMetricsQuery = graphql(`
   query HTTPMetrics(
+    $accountID: string!
     $zoneIDs: [string!]
     $mintime: Time!
     $maxtime: Time!
     $limit: uint64!
   ) {
     viewer {
-      zones(filter: { zoneTag_in: $zoneIDs }) {
-        zoneTag
-        httpRequests1mGroups(
-          limit: $limit
-          filter: { datetime_geq: $mintime, datetime_lt: $maxtime }
-        ) {
-          uniq {
-            uniques
-          }
-          sum {
-            browserMap {
+      accounts(filter: { accountTag: $accountID }) {
+        zones(filter: { zoneTag_in: $zoneIDs }) {
+          zoneTag
+          httpRequests1mGroups(
+            limit: $limit
+            filter: { datetime_geq: $mintime, datetime_lt: $maxtime }
+          ) {
+            uniq {
+              uniques
+            }
+            sum {
+              browserMap {
+                pageViews
+                uaBrowserFamily
+              }
+              bytes
+              cachedBytes
+              cachedRequests
+              contentTypeMap {
+                bytes
+                requests
+                edgeResponseContentTypeName
+              }
+              countryMap {
+                bytes
+                clientCountryName
+                requests
+                threats
+              }
+              encryptedBytes
+              encryptedRequests
               pageViews
-              uaBrowserFamily
-            }
-            bytes
-            cachedBytes
-            cachedRequests
-            contentTypeMap {
-              bytes
               requests
-              edgeResponseContentTypeName
-            }
-            countryMap {
-              bytes
-              clientCountryName
-              requests
+              responseStatusMap {
+                edgeResponseStatus
+                requests
+              }
+              threatPathingMap {
+                requests
+                threatPathingName
+              }
               threats
+              clientHTTPVersionMap {
+                clientHTTPProtocol
+                requests
+              }
+              clientSSLMap {
+                clientSSLProtocol
+                requests
+              }
+              ipClassMap {
+                ipType
+                requests
+              }
             }
-            encryptedBytes
-            encryptedRequests
-            pageViews
-            requests
-            responseStatusMap {
-              edgeResponseStatus
-              requests
-            }
-            threatPathingMap {
-              requests
-              threatPathingName
-            }
-            threats
-            clientHTTPVersionMap {
-              clientHTTPProtocol
-              requests
-            }
-            clientSSLMap {
-              clientSSLProtocol
-              requests
-            }
-            ipClassMap {
-              ipType
-              requests
+            dimensions {
+              datetime
             }
           }
-          dimensions {
-            datetime
-          }
-        }
-        firewallEventsAdaptiveGroups(
-          limit: $limit
-          filter: { datetime_geq: $mintime, datetime_lt: $maxtime }
-        ) {
-          count
-          dimensions {
-            action
-            source
-            ruleId
-            clientRequestHTTPHost
-            clientCountryName
-            botScore
-            botScoreSrcName
+          firewallEventsAdaptiveGroups(
+            limit: $limit
+            filter: { datetime_geq: $mintime, datetime_lt: $maxtime }
+          ) {
+            count
+            dimensions {
+              action
+              source
+              ruleId
+              clientRequestHTTPHost
+              clientCountryName
+              botScore
+              botScoreSrcName
+            }
           }
         }
       }
@@ -88,81 +91,84 @@ export const HTTPMetricsQuery = graphql(`
 
 export const HTTPMetricsQueryNoBots = graphql(`
   query HTTPMetricsNoBots(
+    $accountID: string!
     $zoneIDs: [string!]
     $mintime: Time!
     $maxtime: Time!
     $limit: uint64!
   ) {
     viewer {
-      zones(filter: { zoneTag_in: $zoneIDs }) {
-        zoneTag
-        httpRequests1mGroups(
-          limit: $limit
-          filter: { datetime_geq: $mintime, datetime_lt: $maxtime }
-        ) {
-          uniq {
-            uniques
-          }
-          sum {
-            browserMap {
+      accounts(filter: { accountTag: $accountID }) {
+        zones(filter: { zoneTag_in: $zoneIDs }) {
+          zoneTag
+          httpRequests1mGroups(
+            limit: $limit
+            filter: { datetime_geq: $mintime, datetime_lt: $maxtime }
+          ) {
+            uniq {
+              uniques
+            }
+            sum {
+              browserMap {
+                pageViews
+                uaBrowserFamily
+              }
+              bytes
+              cachedBytes
+              cachedRequests
+              contentTypeMap {
+                bytes
+                requests
+                edgeResponseContentTypeName
+              }
+              countryMap {
+                bytes
+                clientCountryName
+                requests
+                threats
+              }
+              encryptedBytes
+              encryptedRequests
               pageViews
-              uaBrowserFamily
-            }
-            bytes
-            cachedBytes
-            cachedRequests
-            contentTypeMap {
-              bytes
               requests
-              edgeResponseContentTypeName
-            }
-            countryMap {
-              bytes
-              clientCountryName
-              requests
+              responseStatusMap {
+                edgeResponseStatus
+                requests
+              }
+              threatPathingMap {
+                requests
+                threatPathingName
+              }
               threats
+              clientHTTPVersionMap {
+                clientHTTPProtocol
+                requests
+              }
+              clientSSLMap {
+                clientSSLProtocol
+                requests
+              }
+              ipClassMap {
+                ipType
+                requests
+              }
             }
-            encryptedBytes
-            encryptedRequests
-            pageViews
-            requests
-            responseStatusMap {
-              edgeResponseStatus
-              requests
-            }
-            threatPathingMap {
-              requests
-              threatPathingName
-            }
-            threats
-            clientHTTPVersionMap {
-              clientHTTPProtocol
-              requests
-            }
-            clientSSLMap {
-              clientSSLProtocol
-              requests
-            }
-            ipClassMap {
-              ipType
-              requests
+            dimensions {
+              datetime
             }
           }
-          dimensions {
-            datetime
-          }
-        }
-        firewallEventsAdaptiveGroups(
-          limit: $limit
-          filter: { datetime_geq: $mintime, datetime_lt: $maxtime }
-        ) {
-          count
-          dimensions {
-            action
-            source
-            ruleId
-            clientRequestHTTPHost
-            clientCountryName
+          firewallEventsAdaptiveGroups(
+            limit: $limit
+            filter: { datetime_geq: $mintime, datetime_lt: $maxtime }
+          ) {
+            count
+            dimensions {
+              action
+              source
+              ruleId
+              clientRequestHTTPHost
+              clientCountryName
+            }
           }
         }
       }
@@ -172,25 +178,28 @@ export const HTTPMetricsQueryNoBots = graphql(`
 
 export const FirewallMetricsQuery = graphql(`
   query FirewallMetrics(
+    $accountID: string!
     $zoneIDs: [string!]
     $mintime: Time!
     $maxtime: Time!
     $limit: uint64!
   ) {
     viewer {
-      zones(filter: { zoneTag_in: $zoneIDs }) {
-        zoneTag
-        firewallEventsAdaptiveGroups(
-          limit: $limit
-          filter: { datetime_geq: $mintime, datetime_lt: $maxtime }
-        ) {
-          count
-          dimensions {
-            action
-            source
-            ruleId
-            clientRequestHTTPHost
-            clientCountryName
+      accounts(filter: { accountTag: $accountID }) {
+        zones(filter: { zoneTag_in: $zoneIDs }) {
+          zoneTag
+          firewallEventsAdaptiveGroups(
+            limit: $limit
+            filter: { datetime_geq: $mintime, datetime_lt: $maxtime }
+          ) {
+            count
+            dimensions {
+              action
+              source
+              ruleId
+              clientRequestHTTPHost
+              clientCountryName
+            }
           }
         }
       }
@@ -200,31 +209,34 @@ export const FirewallMetricsQuery = graphql(`
 
 export const HealthCheckMetricsQuery = graphql(`
   query HealthCheckMetrics(
+    $accountID: string!
     $zoneIDs: [string!]
     $mintime: Time!
     $maxtime: Time!
     $limit: uint64!
   ) {
     viewer {
-      zones(filter: { zoneTag_in: $zoneIDs }) {
-        zoneTag
-        healthCheckEventsAdaptiveGroups(
-          limit: $limit
-          filter: { datetime_geq: $mintime, datetime_lt: $maxtime }
-        ) {
-          count
-          avg {
-            rttMs
-            timeToFirstByteMs
-            tcpConnMs
-            tlsHandshakeMs
-          }
-          dimensions {
-            healthStatus
-            originIP
-            region
-            fqdn
-            failureReason
+      accounts(filter: { accountTag: $accountID }) {
+        zones(filter: { zoneTag_in: $zoneIDs }) {
+          zoneTag
+          healthCheckEventsAdaptiveGroups(
+            limit: $limit
+            filter: { datetime_geq: $mintime, datetime_lt: $maxtime }
+          ) {
+            count
+            avg {
+              rttMs
+              timeToFirstByteMs
+              tcpConnMs
+              tlsHandshakeMs
+            }
+            dimensions {
+              healthStatus
+              originIP
+              region
+              fqdn
+              failureReason
+            }
           }
         }
       }
@@ -234,41 +246,44 @@ export const HealthCheckMetricsQuery = graphql(`
 
 export const AdaptiveMetricsQuery = graphql(`
   query AdaptiveMetrics(
+    $accountID: string!
     $zoneIDs: [string!]
     $mintime: Time!
     $maxtime: Time!
     $limit: uint64!
   ) {
     viewer {
-      zones(filter: { zoneTag_in: $zoneIDs }) {
-        zoneTag
-        httpRequestsAdaptiveGroups(
-          limit: $limit
-          filter: {
-            datetime_geq: $mintime
-            datetime_lt: $maxtime
-            cacheStatus_notin: ["hit"]
-            originResponseStatus_in: [
-              400
-              404
-              500
-              502
-              503
-              504
-              522
-              523
-              524
-            ]
-          }
-        ) {
-          count
-          dimensions {
-            originResponseStatus
-            clientCountryName
-            clientRequestHTTPHost
-          }
-          avg {
-            originResponseDurationMs
+      accounts(filter: { accountTag: $accountID }) {
+        zones(filter: { zoneTag_in: $zoneIDs }) {
+          zoneTag
+          httpRequestsAdaptiveGroups(
+            limit: $limit
+            filter: {
+              datetime_geq: $mintime
+              datetime_lt: $maxtime
+              cacheStatus_notin: ["hit"]
+              originResponseStatus_in: [
+                400
+                404
+                500
+                502
+                503
+                504
+                522
+                523
+                524
+              ]
+            }
+          ) {
+            count
+            dimensions {
+              originResponseStatus
+              clientCountryName
+              clientRequestHTTPHost
+            }
+            avg {
+              originResponseDurationMs
+            }
           }
         }
       }
@@ -278,23 +293,26 @@ export const AdaptiveMetricsQuery = graphql(`
 
 export const EdgeCountryMetricsQuery = graphql(`
   query EdgeCountryMetrics(
+    $accountID: string!
     $zoneIDs: [string!]
     $mintime: Time!
     $maxtime: Time!
     $limit: uint64!
   ) {
     viewer {
-      zones(filter: { zoneTag_in: $zoneIDs }) {
-        zoneTag
-        httpRequestsEdgeCountryHost: httpRequestsAdaptiveGroups(
-          limit: $limit
-          filter: { datetime_geq: $mintime, datetime_lt: $maxtime }
-        ) {
-          count
-          dimensions {
-            edgeResponseStatus
-            clientCountryName
-            clientRequestHTTPHost
+      accounts(filter: { accountTag: $accountID }) {
+        zones(filter: { zoneTag_in: $zoneIDs }) {
+          zoneTag
+          httpRequestsEdgeCountryHost: httpRequestsAdaptiveGroups(
+            limit: $limit
+            filter: { datetime_geq: $mintime, datetime_lt: $maxtime }
+          ) {
+            count
+            dimensions {
+              edgeResponseStatus
+              clientCountryName
+              clientRequestHTTPHost
+            }
           }
         }
       }
@@ -304,31 +322,34 @@ export const EdgeCountryMetricsQuery = graphql(`
 
 export const ColoMetricsQuery = graphql(`
   query ColoMetrics(
+    $accountID: string!
     $zoneIDs: [string!]
     $mintime: Time!
     $maxtime: Time!
     $limit: uint64!
   ) {
     viewer {
-      zones(filter: { zoneTag_in: $zoneIDs }) {
-        zoneTag
-        httpRequestsAdaptiveGroups(
-          limit: $limit
-          filter: { datetime_geq: $mintime, datetime_lt: $maxtime }
-        ) {
-          count
-          avg {
-            sampleInterval
-          }
-          dimensions {
-            clientRequestHTTPHost
-            coloCode
-            datetime
-            originResponseStatus
-          }
-          sum {
-            edgeResponseBytes
-            visits
+      accounts(filter: { accountTag: $accountID }) {
+        zones(filter: { zoneTag_in: $zoneIDs }) {
+          zoneTag
+          httpRequestsAdaptiveGroups(
+            limit: $limit
+            filter: { datetime_geq: $mintime, datetime_lt: $maxtime }
+          ) {
+            count
+            avg {
+              sampleInterval
+            }
+            dimensions {
+              clientRequestHTTPHost
+              coloCode
+              datetime
+              originResponseStatus
+            }
+            sum {
+              edgeResponseBytes
+              visits
+            }
           }
         }
       }
@@ -338,31 +359,34 @@ export const ColoMetricsQuery = graphql(`
 
 export const ColoErrorMetricsQuery = graphql(`
   query ColoErrorMetrics(
+    $accountID: string!
     $zoneIDs: [string!]
     $mintime: Time!
     $maxtime: Time!
     $limit: uint64!
   ) {
     viewer {
-      zones(filter: { zoneTag_in: $zoneIDs }) {
-        zoneTag
-        httpRequestsAdaptiveGroups(
-          limit: $limit
-          filter: {
-            datetime_geq: $mintime
-            datetime_lt: $maxtime
-            edgeResponseStatus_geq: 400
-          }
-        ) {
-          count
-          dimensions {
-            clientRequestHTTPHost
-            coloCode
-            edgeResponseStatus
-          }
-          sum {
-            edgeResponseBytes
-            visits
+      accounts(filter: { accountTag: $accountID }) {
+        zones(filter: { zoneTag_in: $zoneIDs }) {
+          zoneTag
+          httpRequestsAdaptiveGroups(
+            limit: $limit
+            filter: {
+              datetime_geq: $mintime
+              datetime_lt: $maxtime
+              edgeResponseStatus_geq: 400
+            }
+          ) {
+            count
+            dimensions {
+              clientRequestHTTPHost
+              coloCode
+              edgeResponseStatus
+            }
+            sum {
+              edgeResponseBytes
+              visits
+            }
           }
         }
       }
@@ -413,42 +437,45 @@ export const WorkerTotalsQuery = graphql(`
 
 export const LoadBalancerMetricsQuery = graphql(`
   query LoadBalancerMetrics(
+    $accountID: string!
     $zoneIDs: [string!]
     $mintime: Time!
     $maxtime: Time!
     $limit: uint64!
   ) {
     viewer {
-      zones(filter: { zoneTag_in: $zoneIDs }) {
-        zoneTag
-        loadBalancingRequestsAdaptiveGroups(
-          filter: { datetime_geq: $mintime, datetime_lt: $maxtime }
-          limit: $limit
-        ) {
-          count
-          dimensions {
-            lbName
-            selectedPoolName
-            selectedOriginName
-            region
-            proxied
-            selectedPoolAvgRttMs
-            selectedPoolHealthy
-            steeringPolicy
-            numberOriginsSelected
+      accounts(filter: { accountTag: $accountID }) {
+        zones(filter: { zoneTag_in: $zoneIDs }) {
+          zoneTag
+          loadBalancingRequestsAdaptiveGroups(
+            filter: { datetime_geq: $mintime, datetime_lt: $maxtime }
+            limit: $limit
+          ) {
+            count
+            dimensions {
+              lbName
+              selectedPoolName
+              selectedOriginName
+              region
+              proxied
+              selectedPoolAvgRttMs
+              selectedPoolHealthy
+              steeringPolicy
+              numberOriginsSelected
+            }
           }
-        }
-        loadBalancingRequestsAdaptive(
-          filter: { datetime_geq: $mintime, datetime_lt: $maxtime }
-          limit: $limit
-        ) {
-          lbName
-          pools {
-            id
-            poolName
-            healthy
-            healthCheckEnabled
-            avgRttMs
+          loadBalancingRequestsAdaptive(
+            filter: { datetime_geq: $mintime, datetime_lt: $maxtime }
+            limit: $limit
+          ) {
+            lbName
+            pools {
+              id
+              poolName
+              healthy
+              healthCheckEnabled
+              avgRttMs
+            }
           }
         }
       }
@@ -492,29 +519,32 @@ export const LogpushAccountMetricsQuery = graphql(`
 
 export const LogpushZoneMetricsQuery = graphql(`
   query LogpushZoneMetrics(
+    $accountID: string!
     $zoneIDs: [string!]
     $limit: uint64!
     $mintime: Time!
     $maxtime: Time!
   ) {
     viewer {
-      zones(filter: { zoneTag_in: $zoneIDs }) {
-        zoneTag
-        logpushHealthAdaptiveGroups(
-          filter: {
-            datetime_geq: $mintime
-            datetime_lt: $maxtime
-            status_neq: 200
-          }
-          limit: $limit
-        ) {
-          count
-          dimensions {
-            jobId
-            status
-            destinationType
-            datetime
-            final
+      accounts(filter: { accountTag: $accountID }) {
+        zones(filter: { zoneTag_in: $zoneIDs }) {
+          zoneTag
+          logpushHealthAdaptiveGroups(
+            filter: {
+              datetime_geq: $mintime
+              datetime_lt: $maxtime
+              status_neq: 200
+            }
+            limit: $limit
+          ) {
+            count
+            dimensions {
+              jobId
+              status
+              destinationType
+              datetime
+              final
+            }
           }
         }
       }
@@ -645,21 +675,24 @@ export const MagicFirewallSamplesQuery = graphql(`
 
 export const RequestMethodMetricsQuery = graphql(`
   query RequestMethodMetrics(
+    $accountID: string!
     $zoneIDs: [string!]
     $mintime: Time!
     $maxtime: Time!
     $limit: uint64!
   ) {
     viewer {
-      zones(filter: { zoneTag_in: $zoneIDs }) {
-        zoneTag
-        httpRequestsAdaptiveGroups(
-          limit: $limit
-          filter: { datetime_geq: $mintime, datetime_lt: $maxtime }
-        ) {
-          count
-          dimensions {
-            clientRequestHTTPMethodName
+      accounts(filter: { accountTag: $accountID }) {
+        zones(filter: { zoneTag_in: $zoneIDs }) {
+          zoneTag
+          httpRequestsAdaptiveGroups(
+            limit: $limit
+            filter: { datetime_geq: $mintime, datetime_lt: $maxtime }
+          ) {
+            count
+            dimensions {
+              clientRequestHTTPMethodName
+            }
           }
         }
       }
@@ -669,23 +702,26 @@ export const RequestMethodMetricsQuery = graphql(`
 
 export const OriginStatusMetricsQuery = graphql(`
   query OriginStatusMetrics(
+    $accountID: string!
     $zoneIDs: [string!]
     $mintime: Time!
     $maxtime: Time!
     $limit: uint64!
   ) {
     viewer {
-      zones(filter: { zoneTag_in: $zoneIDs }) {
-        zoneTag
-        httpRequestsAdaptiveGroups(
-          limit: $limit
-          filter: { datetime_geq: $mintime, datetime_lt: $maxtime }
-        ) {
-          count
-          dimensions {
-            originResponseStatus
-            clientCountryName
-            clientRequestHTTPHost
+      accounts(filter: { accountTag: $accountID }) {
+        zones(filter: { zoneTag_in: $zoneIDs }) {
+          zoneTag
+          httpRequestsAdaptiveGroups(
+            limit: $limit
+            filter: { datetime_geq: $mintime, datetime_lt: $maxtime }
+          ) {
+            count
+            dimensions {
+              originResponseStatus
+              clientCountryName
+              clientRequestHTTPHost
+            }
           }
         }
       }
@@ -695,6 +731,7 @@ export const OriginStatusMetricsQuery = graphql(`
 
 export const HostnameHttpMetricsQuery = graphql(`
   query HostnameHttpMetrics(
+    $accountID: string!
     $zoneIDs: [string!]
     $mintime: Time!
     $maxtime: Time!
@@ -702,73 +739,75 @@ export const HostnameHttpMetricsQuery = graphql(`
     $hosts: [string!]
   ) {
     viewer {
-      zones(filter: { zoneTag_in: $zoneIDs }) {
-        zoneTag
+      accounts(filter: { accountTag: $accountID }) {
+        zones(filter: { zoneTag_in: $zoneIDs }) {
+          zoneTag
 
-        hostRequests: httpRequestsAdaptiveGroups(
-          limit: $limit
-          filter: {
-            datetime_geq: $mintime
-            datetime_lt: $maxtime
-            clientRequestHTTPHost_in: $hosts
+          hostRequests: httpRequestsAdaptiveGroups(
+            limit: $limit
+            filter: {
+              datetime_geq: $mintime
+              datetime_lt: $maxtime
+              clientRequestHTTPHost_in: $hosts
+            }
+          ) {
+            count
+            dimensions {
+              clientRequestHTTPHost
+            }
           }
-        ) {
-          count
-          dimensions {
-            clientRequestHTTPHost
-          }
-        }
 
-        hostStatus: httpRequestsAdaptiveGroups(
-          limit: $limit
-          filter: {
-            datetime_geq: $mintime
-            datetime_lt: $maxtime
-            clientRequestHTTPHost_in: $hosts
+          hostStatus: httpRequestsAdaptiveGroups(
+            limit: $limit
+            filter: {
+              datetime_geq: $mintime
+              datetime_lt: $maxtime
+              clientRequestHTTPHost_in: $hosts
+            }
+          ) {
+            count
+            dimensions {
+              clientRequestHTTPHost
+              edgeResponseStatus
+            }
           }
-        ) {
-          count
-          dimensions {
-            clientRequestHTTPHost
-            edgeResponseStatus
-          }
-        }
 
-        hostCache: httpRequestsAdaptiveGroups(
-          limit: $limit
-          filter: {
-            datetime_geq: $mintime
-            datetime_lt: $maxtime
-            clientRequestHTTPHost_in: $hosts
+          hostCache: httpRequestsAdaptiveGroups(
+            limit: $limit
+            filter: {
+              datetime_geq: $mintime
+              datetime_lt: $maxtime
+              clientRequestHTTPHost_in: $hosts
+            }
+          ) {
+            count
+            dimensions {
+              clientRequestHTTPHost
+              cacheStatus
+            }
           }
-        ) {
-          count
-          dimensions {
-            clientRequestHTTPHost
-            cacheStatus
-          }
-        }
 
-        hostLatency: httpRequestsAdaptiveGroups(
-          limit: $limit
-          filter: {
-            datetime_geq: $mintime
-            datetime_lt: $maxtime
-            clientRequestHTTPHost_in: $hosts
-          }
-        ) {
-          dimensions {
-            clientRequestHTTPHost
-          }
-          avg {
-            edgeTimeToFirstByteMs
-            originResponseDurationMs
-          }
-          quantiles {
-            edgeTimeToFirstByteMsP50
-            edgeTimeToFirstByteMsP95
-            originResponseDurationMsP50
-            originResponseDurationMsP95
+          hostLatency: httpRequestsAdaptiveGroups(
+            limit: $limit
+            filter: {
+              datetime_geq: $mintime
+              datetime_lt: $maxtime
+              clientRequestHTTPHost_in: $hosts
+            }
+          ) {
+            dimensions {
+              clientRequestHTTPHost
+            }
+            avg {
+              edgeTimeToFirstByteMs
+              originResponseDurationMs
+            }
+            quantiles {
+              edgeTimeToFirstByteMsP50
+              edgeTimeToFirstByteMsP95
+              originResponseDurationMsP50
+              originResponseDurationMsP95
+            }
           }
         }
       }
@@ -778,29 +817,32 @@ export const HostnameHttpMetricsQuery = graphql(`
 
 export const CacheMissMetricsQuery = graphql(`
   query CacheMissMetrics(
+    $accountID: string!
     $zoneIDs: [string!]
     $mintime: Time!
     $maxtime: Time!
     $limit: uint64!
   ) {
     viewer {
-      zones(filter: { zoneTag_in: $zoneIDs }) {
-        zoneTag
-        httpRequestsAdaptiveGroups(
-          filter: {
-            datetime_geq: $mintime
-            datetime_lt: $maxtime
-            cacheStatus: "miss"
-          }
-          limit: $limit
-        ) {
-          count
-          avg {
-            originResponseDurationMs
-          }
-          dimensions {
-            clientCountryName
-            clientRequestHTTPHost
+      accounts(filter: { accountTag: $accountID }) {
+        zones(filter: { zoneTag_in: $zoneIDs }) {
+          zoneTag
+          httpRequestsAdaptiveGroups(
+            filter: {
+              datetime_geq: $mintime
+              datetime_lt: $maxtime
+              cacheStatus: "miss"
+            }
+            limit: $limit
+          ) {
+            count
+            avg {
+              originResponseDurationMs
+            }
+            dimensions {
+              clientCountryName
+              clientRequestHTTPHost
+            }
           }
         }
       }
