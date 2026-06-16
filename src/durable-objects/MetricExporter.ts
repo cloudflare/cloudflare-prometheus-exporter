@@ -1,25 +1,34 @@
 import { DurableObject } from "cloudflare:workers";
+import z from "zod";
 import {
 	getCloudflareMetricsClient,
 	isAccountLevelQuery,
 	isZoneLevelQuery,
 } from "../cloudflare/client";
 import { isPaidTierGraphQLQuery } from "../cloudflare/queries";
+import {
+	chunkedDurableObjectStorage,
+	loadChunkedValue,
+	saveChunkedValue,
+} from "../lib/chunked-storage";
+import { accumulateCounterMetrics } from "../lib/counters";
 import { parseCommaSeparated, partitionZonesByTier } from "../lib/filters";
 import { createLogger, type Logger } from "../lib/logger";
+import { getMetricRefreshDelaySeconds } from "../lib/metric-refresh";
 import {
 	type MetricDefinition,
-	type MetricValue,
+	MetricDefinitionSchema,
 	mergeMetricDefinitions,
 } from "../lib/metrics";
 import { getConfig, type ResolvedConfig } from "../lib/runtime-config";
-import { getTimeRange, metricKey } from "../lib/time";
+import { getTimeRange } from "../lib/time";
 import {
-	type CounterState,
+	CounterStateSchema,
 	MetricExporterIdSchema,
 	type MetricExporterIdString,
 	type TimeRange,
 	type Zone,
+	ZoneSchema,
 } from "../lib/types";
 
 const STATE_KEY = "state";
@@ -30,34 +39,36 @@ const STATE_KEY = "state";
  */
 const MAX_HOSTNAME_ALLOWLIST_SIZE = 50;
 
-type MetricExporterState = {
+const MetricExporterStateSchema = z.object({
 	// Core identity
-	scopeType: "account" | "zone";
-	scopeId: string;
-	queryName: string;
+	scopeType: z.enum(["account", "zone"]),
+	scopeId: z.string(),
+	queryName: z.string(),
 
 	// Metric storage
-	counters: Record<string, CounterState>;
-	metrics: MetricDefinition[];
-	lastIngest: number;
+	counters: z.record(z.string(), CounterStateSchema),
+	metrics: z.array(MetricDefinitionSchema),
+	lastIngest: z.number(),
 
 	// Context for fetching (account-scoped)
-	accountId: string;
-	accountName: string;
-	zones: Zone[];
-	firewallRules: Record<string, string>;
+	accountId: z.string(),
+	accountName: z.string(),
+	zones: z.array(ZoneSchema),
+	firewallRules: z.record(z.string(), z.string()),
 
 	// Context for fetching (zone-scoped)
-	zoneMetadata: Zone | null;
+	zoneMetadata: ZoneSchema.nullable(),
 
 	// Refresh state
-	refreshInterval: number;
-	lastRefresh: number;
-	lastError: string | null;
+	refreshInterval: z.number(),
+	lastRefresh: z.number(),
+	lastError: z.string().nullable(),
 
 	// SSL cert cache (zone-scoped only)
-	lastSslFetch: number;
-};
+	lastSslFetch: z.number(),
+});
+
+type MetricExporterState = z.infer<typeof MetricExporterStateSchema>;
 
 /**
  * Durable Object that fetches and exports Prometheus metrics for a specific query scope.
@@ -69,7 +80,11 @@ export class MetricExporter extends DurableObject<Env> {
 	constructor(ctx: DurableObjectState, env: Env) {
 		super(ctx, env);
 		ctx.blockConcurrencyWhile(async () => {
-			this.state = await ctx.storage.get<MetricExporterState>(STATE_KEY);
+			this.state = await loadChunkedValue(
+				chunkedDurableObjectStorage(ctx.storage),
+				STATE_KEY,
+				MetricExporterStateSchema,
+			);
 		});
 	}
 
@@ -152,7 +167,7 @@ export class MetricExporter extends DurableObject<Env> {
 			lastSslFetch: 0,
 		};
 
-		await this.ctx.storage.put(STATE_KEY, this.state);
+		await this.saveState();
 	}
 
 	/**
@@ -192,7 +207,7 @@ export class MetricExporter extends DurableObject<Env> {
 			zones,
 			firewallRules,
 		};
-		await this.ctx.storage.put(STATE_KEY, this.state);
+		await this.saveState();
 
 		logger.info("Zone context updated", { zone_count: zones.length });
 
@@ -235,7 +250,7 @@ export class MetricExporter extends DurableObject<Env> {
 			accountName,
 			zoneMetadata: zone,
 		};
-		await this.ctx.storage.put(STATE_KEY, this.state);
+		await this.saveState();
 
 		logger.info("Zone metadata set", { zone: zone.name });
 
@@ -316,6 +331,7 @@ export class MetricExporter extends DurableObject<Env> {
 		}
 
 		const client = getCloudflareMetricsClient(this.env);
+		let nextRefreshDelaySeconds = config.metricRefreshIntervalSeconds;
 
 		try {
 			let metrics: MetricDefinition[];
@@ -332,7 +348,7 @@ export class MetricExporter extends DurableObject<Env> {
 				metrics = await this.fetchZoneScopedMetrics(client, state);
 			}
 
-			const processed = this.processCounters(metrics, state.counters);
+			const processed = accumulateCounterMetrics(metrics, state.counters);
 
 			this.state = {
 				...state,
@@ -343,19 +359,26 @@ export class MetricExporter extends DurableObject<Env> {
 					state.scopeType === "zone" ? Date.now() : state.lastSslFetch,
 				lastError: null,
 			};
-			await this.ctx.storage.put(STATE_KEY, this.state);
+			await this.saveState();
 
 			logger.info("Refresh complete", {
 				metric_count: metrics.length,
 			});
 		} catch (error) {
 			const msg = error instanceof Error ? error.message : String(error);
-			logger.error("Refresh failed", { error: msg });
+			nextRefreshDelaySeconds = getMetricRefreshDelaySeconds(
+				error,
+				config.metricRefreshIntervalSeconds,
+			);
+			logger.error("Refresh failed", {
+				error: msg,
+				retry_seconds: nextRefreshDelaySeconds,
+			});
 			this.state = { ...state, lastError: msg };
-			await this.ctx.storage.put(STATE_KEY, this.state);
+			await this.saveState();
 		}
 
-		await this.scheduleNextAlarm(config);
+		await this.scheduleNextAlarm(config, nextRefreshDelaySeconds);
 	}
 
 	/**
@@ -363,17 +386,18 @@ export class MetricExporter extends DurableObject<Env> {
 	 *
 	 * @param config Resolved runtime configuration.
 	 */
-	private async scheduleNextAlarm(config: ResolvedConfig): Promise<void> {
+	private async scheduleNextAlarm(
+		config: ResolvedConfig,
+		delaySeconds: number = config.metricRefreshIntervalSeconds,
+	): Promise<void> {
 		const intervalMs = config.metricRefreshIntervalSeconds * 1000;
-
-		// Get the start of the current minute interval
+		const delayMs = delaySeconds * 1000;
 		const now = Date.now();
-		const startOfInterval = Math.floor(now / intervalMs) * intervalMs;
-
-		// Add the jitter (1-5s) to the NEXT interval start
-		// This ensures we always fire at ":01-05" of every interval
 		const jitter = 1000 + Math.random() * 4000;
-		const nextAlarm = startOfInterval + intervalMs + jitter;
+		const nextAlarm =
+			delaySeconds === config.metricRefreshIntervalSeconds
+				? Math.floor(now / intervalMs) * intervalMs + intervalMs + jitter
+				: now + delayMs + jitter;
 
 		await this.ctx.storage.setAlarm(nextAlarm);
 	}
@@ -479,6 +503,7 @@ export class MetricExporter extends DurableObject<Env> {
 			}
 
 			const chunkResults: MetricDefinition[][] = [];
+			let firstChunkError: unknown;
 			for (let i = 0; i < zonesToQuery.length; i += ZONES_PER_CHUNK) {
 				const chunkZones = zonesToQuery.slice(i, i + ZONES_PER_CHUNK);
 				const chunkIds = chunkZones.map((z) => z.id);
@@ -495,10 +520,10 @@ export class MetricExporter extends DurableObject<Env> {
 					);
 					chunkResults.push(metrics);
 				} catch (error) {
+					firstChunkError ??= error;
 					// Log and continue — partial results from other chunks are still valuable.
 					// Missing zones don't increment their counters this cycle;
-					// processCounters() accumulates per (name, labels) key so existing
-					// counter values are preserved. Next alarm retries all chunks.
+					// accumulateCounterMetrics() retains their state for the expiry window.
 					logger.error("Zone chunk query failed", {
 						query: queryName,
 						chunk_index: Math.floor(i / ZONES_PER_CHUNK),
@@ -510,6 +535,9 @@ export class MetricExporter extends DurableObject<Env> {
 				}
 			}
 
+			if (chunkResults.length === 0 && firstChunkError !== undefined) {
+				throw firstChunkError;
+			}
 			return mergeMetricDefinitions(...chunkResults);
 		}
 
@@ -547,6 +575,15 @@ export class MetricExporter extends DurableObject<Env> {
 		}
 	}
 
+	/** Persist current state in bounded storage chunks. */
+	private async saveState(): Promise<void> {
+		await saveChunkedValue(
+			chunkedDurableObjectStorage(this.ctx.storage),
+			STATE_KEY,
+			this.getState(),
+		);
+	}
+
 	/**
 	 * Return cached accumulated metrics.
 	 *
@@ -555,53 +592,5 @@ export class MetricExporter extends DurableObject<Env> {
 	async export(): Promise<MetricDefinition[]> {
 		const state = this.getState();
 		return state.metrics;
-	}
-
-	/**
-	 * Process raw metrics and accumulate counter values.
-	 *
-	 * @param rawMetrics Raw metrics from Cloudflare API.
-	 * @param existingCounters Existing counter state.
-	 * @returns Processed metrics with accumulated counter values and updated counter state.
-	 */
-	private processCounters(
-		rawMetrics: MetricDefinition[],
-		existingCounters: Record<string, CounterState>,
-	): { metrics: MetricDefinition[]; counters: Record<string, CounterState> } {
-		const newCounters: Record<string, CounterState> = { ...existingCounters };
-
-		const metrics = rawMetrics.map((metric) => {
-			if (metric.type !== "counter") {
-				return metric;
-			}
-
-			const processedValues: MetricValue[] = metric.values.map((value) => {
-				const key = metricKey(metric.name, value.labels);
-				newCounters[key] = this.updateCounter(newCounters[key], value.value);
-				return { labels: value.labels, value: newCounters[key].accumulated };
-			});
-
-			return { ...metric, values: processedValues };
-		});
-
-		return { metrics, counters: newCounters };
-	}
-
-	/**
-	 * Update counter state with a new raw value.
-	 * Cloudflare API returns window-based totals, so we simply add them.
-	 *
-	 * @param existing Existing counter state or undefined for new counter.
-	 * @param rawValue Window total from API to add to accumulated value.
-	 * @returns Updated counter state with accumulated value.
-	 */
-	private updateCounter(
-		existing: CounterState | undefined,
-		rawValue: number,
-	): CounterState {
-		if (!existing) {
-			return { accumulated: rawValue };
-		}
-		return { accumulated: existing.accumulated + rawValue };
 	}
 }

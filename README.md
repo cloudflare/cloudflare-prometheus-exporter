@@ -696,12 +696,18 @@ For mixed accounts (enterprise + free zones), only free zones are skipped—paid
 └────────────────────────────────────────────────────────────────────────┘
 ```
 
+Counter series are retained for five missed refreshes before being pruned. Metric
+exporter snapshots are persisted in bounded chunks, and product queries denied by
+Cloudflare are retried hourly instead of every refresh interval.
+
 ## Development
 
 ```bash
 bun install          # Install dependencies
 bun run dev          # Run locally (port 8787)
 bun run check        # Lint + format check
+bun run test         # Run tests
+bun run typecheck    # Type-check without emitting files
 bun run deploy       # Deploy to Cloudflare
 ```
 
