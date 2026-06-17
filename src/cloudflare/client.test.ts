@@ -61,7 +61,20 @@ describe("CloudflareMetricsClient", () => {
 		).resolves.toEqual([]);
 	});
 
-	it("surfaces zone analytics access denial for exporter backoff", async () => {
+	it.each([
+		"http-metrics",
+		"adaptive-metrics",
+		"edge-country-metrics",
+		"colo-metrics",
+		"colo-error-metrics",
+		"request-method-metrics",
+		"health-check-metrics",
+		"load-balancer-metrics",
+		"logpush-zone",
+		"origin-status-metrics",
+		"cache-miss-metrics",
+		"hostname-http-metrics",
+	] as const)("surfaces %s access denial for exporter backoff", async (query) => {
 		const fetch: typeof globalThis.fetch = async () =>
 			new Response(
 				JSON.stringify({
@@ -78,7 +91,7 @@ describe("CloudflareMetricsClient", () => {
 
 		await expect(
 			client.getZoneMetrics(
-				"http-metrics",
+				query,
 				["zone-id"],
 				[
 					{
@@ -94,6 +107,9 @@ describe("CloudflareMetricsClient", () => {
 					mintime: "2026-01-01T00:00:00.000Z",
 					maxtime: "2026-01-01T00:01:00.000Z",
 				},
+				query === "hostname-http-metrics"
+					? new Set(["example.com"])
+					: undefined,
 			),
 		).rejects.toMatchObject({ code: ErrorCode.GRAPHQL_FIELD_ACCESS });
 	});

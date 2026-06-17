@@ -697,9 +697,13 @@ For mixed accounts (enterprise + free zones), only free zones are skipped—paid
 ```
 
 Counter series are retained for five missed refreshes before being pruned. Metric
-exporter snapshots are persisted in bounded chunks, product queries denied by
-Cloudflare are retried hourly, and unexpected alarm failures schedule a recovery
-alarm so metric refreshes cannot silently stop.
+exporter snapshots are persisted in bounded chunks (with a 16 MiB total safety
+limit), product queries denied by Cloudflare are retried hourly, and unexpected
+alarm failures schedule a recovery alarm so metric refreshes cannot silently stop.
+
+Chunked snapshots retain the last unchunked state at the legacy storage key, but a
+rollback to a pre-chunking release cannot read the current chunked snapshot and may
+resume the original oversized-write failure. Prefer a forward fix after deployment.
 
 ## Development
 

@@ -2,12 +2,15 @@ import { z } from "zod";
 
 const CHUNK_BYTES = 100 * 1024;
 const MAX_KEYS_PER_OPERATION = 128;
+const MAX_SERIALIZED_BYTES = 16 * 1024 * 1024;
+const MAX_CHUNKS = Math.ceil(MAX_SERIALIZED_BYTES / CHUNK_BYTES);
 const FORMAT = "chunked-json-v1";
 
 const ChunkManifestSchema = z.object({
 	format: z.literal(FORMAT),
-	generation: z.number().int().nonnegative(),
-	chunks: z.number().int().positive(),
+	generation: z.union([z.literal(0), z.literal(1)]),
+	chunks: z.number().int().positive().max(MAX_CHUNKS),
+	bytes: z.number().int().positive().max(MAX_SERIALIZED_BYTES).optional(),
 });
 
 type ChunkManifest = z.infer<typeof ChunkManifestSchema>;
@@ -19,9 +22,7 @@ export interface ChunkedValueStorage {
 	deleteMany(keys: string[]): Promise<void>;
 }
 
-/**
- * Adapts Durable Object storage to the minimal interface used for chunked values.
- */
+/** Adapts Durable Object storage to the minimal chunked-value interface. */
 export function chunkedDurableObjectStorage(
 	storage: DurableObjectStorage,
 ): ChunkedValueStorage {
@@ -35,9 +36,22 @@ export function chunkedDurableObjectStorage(
 	};
 }
 
+function manifestKey(baseKey: string): string {
+	return `${baseKey}:manifest`;
+}
+
+function isChunkFormat(value: unknown): boolean {
+	return (
+		typeof value === "object" &&
+		value !== null &&
+		"format" in value &&
+		value.format === FORMAT
+	);
+}
+
 function parseManifest(value: unknown): ChunkManifest | undefined {
-	const result = ChunkManifestSchema.safeParse(value);
-	return result.success ? result.data : undefined;
+	if (!isChunkFormat(value)) return undefined;
+	return ChunkManifestSchema.parse(value);
 }
 
 function chunkKey(baseKey: string, generation: number, index: number): string {
@@ -68,82 +82,96 @@ async function cleanupPendingGeneration(
 	generation: number,
 ): Promise<void> {
 	const key = pendingKey(baseKey, generation);
-	const pending = parseManifest(await storage.get(key));
-	if (pending === undefined) {
-		return;
-	}
+	const stored = await storage.get(key);
+	if (stored === undefined) return;
+	const pending = ChunkManifestSchema.parse(stored);
 	for (const keyBatch of batches(chunkKeys(baseKey, pending))) {
 		await storage.deleteMany(keyBatch);
 	}
 	await storage.deleteMany([key]);
 }
 
-/**
- * Loads a value written by saveChunkedValue, or a legacy unchunked value.
- */
+async function readCurrentValues(
+	storage: ChunkedValueStorage,
+	baseKey: string,
+): Promise<{ base: unknown; manifest: ChunkManifest | undefined }> {
+	const pointerKey = manifestKey(baseKey);
+	const values = await storage.getMany([baseKey, pointerKey]);
+	const pointer = values.get(pointerKey);
+	if (pointer !== undefined) {
+		return {
+			base: values.get(baseKey),
+			manifest: ChunkManifestSchema.parse(pointer),
+		};
+	}
+	const base = values.get(baseKey);
+	return { base, manifest: parseManifest(base) };
+}
+
+/** Loads a chunked value, or state written by an older unchunked exporter. */
 export async function loadChunkedValue<T>(
 	storage: ChunkedValueStorage,
 	baseKey: string,
 	schema: z.ZodType<T>,
 ): Promise<T | undefined> {
-	const stored = await storage.get(baseKey);
-	if (stored === undefined) {
-		return undefined;
-	}
-	const manifest = parseManifest(stored);
-	if (manifest === undefined) {
-		return schema.parse(stored);
+	const current = await readCurrentValues(storage, baseKey);
+	if (current.manifest === undefined) {
+		return current.base === undefined ? undefined : schema.parse(current.base);
 	}
 
-	const keys = chunkKeys(baseKey, manifest);
-	const values = new Map<string, unknown>();
+	const decoder = new TextDecoder();
+	const keys = chunkKeys(baseKey, current.manifest);
+	let serialized = "";
+	let byteLength = 0;
 	for (const keyBatch of batches(keys)) {
-		const batchValues = await storage.getMany(keyBatch);
-		for (const [key, value] of batchValues) {
-			values.set(key, value);
+		const values = await storage.getMany(keyBatch);
+		for (const key of keyBatch) {
+			const value = values.get(key);
+			if (!(value instanceof Uint8Array)) {
+				throw new Error(`Missing state chunk: ${key}`);
+			}
+			byteLength += value.byteLength;
+			if (byteLength > MAX_SERIALIZED_BYTES) {
+				throw new RangeError(
+					"Chunked storage value exceeds the safe size limit",
+				);
+			}
+			serialized += decoder.decode(value, { stream: true });
 		}
 	}
-
-	const chunks = keys.map((key) => {
-		const value = values.get(key);
-		if (!(value instanceof Uint8Array)) {
-			throw new Error(`Missing state chunk: ${key}`);
-		}
-		return value;
-	});
-	const byteLength = chunks.reduce(
-		(total, chunk) => total + chunk.byteLength,
-		0,
-	);
-	const serialized = new Uint8Array(byteLength);
-	let offset = 0;
-	for (const chunk of chunks) {
-		serialized.set(chunk, offset);
-		offset += chunk.byteLength;
+	serialized += decoder.decode();
+	if (
+		current.manifest.bytes !== undefined &&
+		byteLength !== current.manifest.bytes
+	) {
+		throw new Error("Chunked storage value has an invalid byte length");
 	}
 
-	const parsed: unknown = JSON.parse(new TextDecoder().decode(serialized));
+	const parsed: unknown = JSON.parse(serialized);
 	return schema.parse(parsed);
 }
 
 /**
- * Persists a value as independently bounded chunks. A generation manifest is
- * switched only after all new chunks exist, so readers never observe a partial
- * write. Values written by older versions are migrated on the next save.
+ * Persists a value in bounded chunks and atomically switches a manifest pointer.
+ * The legacy base value is retained while state is large, allowing rollback to an
+ * older exporter to load the last small valid snapshot.
  */
 export async function saveChunkedValue(
 	storage: ChunkedValueStorage,
 	baseKey: string,
 	value: unknown,
 ): Promise<void> {
-	const previous = await storage.get(baseKey);
-	const previousManifest = parseManifest(previous);
+	const current = await readCurrentValues(storage, baseKey);
+	const previousManifest = current.manifest;
 	const generation = previousManifest?.generation === 0 ? 1 : 0;
 	const json = JSON.stringify(value);
 	if (json === undefined) {
 		throw new TypeError("Chunked storage value must be JSON serializable");
 	}
 	const serialized = new TextEncoder().encode(json);
+	if (serialized.byteLength > MAX_SERIALIZED_BYTES) {
+		throw new RangeError("Chunked storage value exceeds the safe size limit");
+	}
 
 	if (serialized.byteLength <= CHUNK_BYTES) {
 		if (previousManifest === undefined) {
@@ -155,6 +183,7 @@ export async function saveChunkedValue(
 			});
 		}
 		await storage.putMany({ [baseKey]: value });
+		await storage.deleteMany([manifestKey(baseKey)]);
 		if (previousManifest !== undefined) {
 			await cleanupPendingGeneration(
 				storage,
@@ -169,12 +198,16 @@ export async function saveChunkedValue(
 		format: FORMAT,
 		generation,
 		chunks: Math.ceil(serialized.byteLength / CHUNK_BYTES),
+		bytes: serialized.byteLength,
 	};
 	const nextPendingKey = pendingKey(baseKey, generation);
-	await cleanupPendingGeneration(storage, baseKey, generation);
+	if (previousManifest === undefined) {
+		await cleanupPendingGeneration(storage, baseKey, 0);
+		await cleanupPendingGeneration(storage, baseKey, 1);
+	} else {
+		await cleanupPendingGeneration(storage, baseKey, generation);
+	}
 
-	// Record both generations before writing chunks. If any later write or
-	// cleanup fails, the next attempt can remove all abandoned values safely.
 	await storage.putMany({
 		[nextPendingKey]: nextManifest,
 		...(previousManifest === undefined
@@ -203,7 +236,7 @@ export async function saveChunkedValue(
 		await storage.putMany(entries);
 	}
 
-	await storage.putMany({ [baseKey]: nextManifest });
+	await storage.putMany({ [manifestKey(baseKey)]: nextManifest });
 
 	if (previousManifest !== undefined) {
 		await cleanupPendingGeneration(

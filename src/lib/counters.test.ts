@@ -45,6 +45,71 @@ describe("accumulateCounterMetrics", () => {
 		expect(secondRefresh.metrics[0]?.values[0]?.value).toBe(50);
 	});
 
+	it("aggregates duplicate observations before accumulating", () => {
+		const counter: MetricDefinition = {
+			name: "cloudflare_requests_total",
+			help: "Total requests",
+			type: "counter",
+			values: [
+				{ labels: { zone: "example.com" }, value: 3 },
+				{ labels: { zone: "example.com" }, value: 4 },
+			],
+		};
+
+		const result = accumulateCounterMetrics([counter], {});
+
+		expect(result.metrics[0]?.values).toEqual([
+			{ labels: { zone: "example.com" }, value: 7 },
+		]);
+	});
+
+	it("does not accumulate the same query window twice", () => {
+		const counter: MetricDefinition = {
+			name: "cloudflare_requests_total",
+			help: "Total requests",
+			type: "counter",
+			values: [{ labels: { zone: "example.com" }, value: 42 }],
+		};
+		const first = accumulateCounterMetrics([counter], {}, { ingestId: 123 });
+		const replay = accumulateCounterMetrics([counter], first.counters, {
+			ingestId: 123,
+			ageMissingCounters: false,
+		});
+
+		expect(replay.metrics[0]?.values[0]?.value).toBe(42);
+		expect(replay.counters).toEqual(first.counters);
+	});
+
+	it("ages successful scopes but not failed scopes during a partial refresh", () => {
+		const failedKey = "cloudflare_requests_total{zone=failed.example.com}";
+		const successfulKey =
+			"cloudflare_requests_total{zone=successful.example.com}";
+		const result = accumulateCounterMetrics(
+			[],
+			{
+				[failedKey]: {
+					accumulated: 42,
+					missesRemaining: 5,
+					lastIngest: 123,
+					scope: "failed.example.com",
+				},
+				[successfulKey]: {
+					accumulated: 7,
+					missesRemaining: 5,
+					lastIngest: 123,
+					scope: "successful.example.com",
+				},
+			},
+			{
+				ingestId: 124,
+				failedScopes: new Set(["failed.example.com"]),
+			},
+		);
+
+		expect(result.counters[failedKey]?.missesRemaining).toBe(5);
+		expect(result.counters[successfulKey]?.missesRemaining).toBe(4);
+	});
+
 	it("passes gauges through without retaining counter state", () => {
 		const gauge: MetricDefinition = {
 			name: "cloudflare_active_connections",
@@ -111,6 +176,20 @@ describe("accumulateCounterMetrics", () => {
 		result = accumulateCounterMetrics([counter], result.counters);
 
 		expect(result.metrics[0]?.values[0]?.value).toBe(8);
+	});
+
+	it("protects legacy zone counters during a partial chunk failure", () => {
+		const key = "cloudflare_requests_total{zone=failed.example.com}";
+		const result = accumulateCounterMetrics(
+			[],
+			{ [key]: { accumulated: 42 } },
+			{ failedScopes: new Set(["failed.example.com"]) },
+		);
+
+		expect(result.counters[key]).toEqual({
+			accumulated: 42,
+			scope: "failed.example.com",
+		});
 	});
 
 	it("expires counter state written before stale-series tracking was added", () => {

@@ -2027,7 +2027,7 @@ export class CloudflareMetricsClient {
 		});
 
 		if (result.error) {
-			throw new Error(`GraphQL error: ${result.error.message}`);
+			throw graphQLQueryError("adaptive-metrics", result.error);
 		}
 
 		const error4xx: MetricDefinition = {
@@ -2133,7 +2133,7 @@ export class CloudflareMetricsClient {
 		});
 
 		if (result.error) {
-			throw new Error(`GraphQL error: ${result.error.message}`);
+			throw graphQLQueryError("edge-country-metrics", result.error);
 		}
 
 		const statusCountryHost: MetricDefinition = {
@@ -2221,7 +2221,7 @@ export class CloudflareMetricsClient {
 		});
 
 		if (result.error) {
-			throw new Error(`GraphQL error: ${result.error.message}`);
+			throw graphQLQueryError("colo-metrics", result.error);
 		}
 
 		const visits: MetricDefinition = {
@@ -2297,7 +2297,7 @@ export class CloudflareMetricsClient {
 		});
 
 		if (result.error) {
-			throw new Error(`GraphQL error: ${result.error.message}`);
+			throw graphQLQueryError("colo-error-metrics", result.error);
 		}
 
 		const visitsError: MetricDefinition = {
@@ -2374,7 +2374,7 @@ export class CloudflareMetricsClient {
 		});
 
 		if (result.error) {
-			throw new Error(`GraphQL error: ${result.error.message}`);
+			throw graphQLQueryError("request-method-metrics", result.error);
 		}
 
 		const methodCount: MetricDefinition = {
@@ -2994,7 +2994,7 @@ export class CloudflareMetricsClient {
 		});
 
 		if (result.error) {
-			throw new Error(`GraphQL error: ${result.error.message}`);
+			throw graphQLQueryError("logpush-zone", result.error);
 		}
 
 		const failedJobs: MetricDefinition = {
@@ -3047,7 +3047,7 @@ export class CloudflareMetricsClient {
 		});
 
 		if (result.error) {
-			throw new Error(`GraphQL error: ${result.error.message}`);
+			throw graphQLQueryError("origin-status-metrics", result.error);
 		}
 
 		const originStatusCountryHost: MetricDefinition = {

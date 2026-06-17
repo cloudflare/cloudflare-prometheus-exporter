@@ -54,6 +54,10 @@ export const CounterStateSchema = z
 		 * Optional so state written by earlier exporter versions can be migrated.
 		 */
 		missesRemaining: z.number().int().nonnegative().optional(),
+		/** Query-window identifier last accumulated for at-least-once safety. */
+		lastIngest: z.number().int().nonnegative().optional(),
+		/** Zone label used to isolate expiry during partial query failures. */
+		scope: z.string().optional(),
 	})
 	.readonly();
 

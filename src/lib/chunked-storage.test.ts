@@ -69,6 +69,19 @@ describe("chunked storage", () => {
 		expect(restored).toEqual(state);
 	});
 
+	it("keeps the legacy base value as a rollback snapshot", async () => {
+		const storage = new SizeLimitedMemoryStorage(110_000);
+		const legacyState = { payload: "legacy" };
+		storage.values.set("state", legacyState);
+
+		await saveChunkedValue(storage, "state", { payload: "x".repeat(300_000) });
+
+		expect(storage.values.get("state")).toEqual(legacyState);
+		expect(await loadChunkedValue(storage, "state", z.unknown())).toEqual({
+			payload: "x".repeat(300_000),
+		});
+	});
+
 	it("reads state written by exporter versions before chunking", async () => {
 		const storage = new SizeLimitedMemoryStorage(110_000);
 		const legacyState = { counters: { requests: 42 } };
@@ -87,6 +100,19 @@ describe("chunked storage", () => {
 		});
 
 		await expect(loadChunkedValue(storage, "state", schema)).rejects.toThrow();
+	});
+
+	it("rejects a malformed manifest before allocating chunk keys", async () => {
+		const storage = new SizeLimitedMemoryStorage(110_000);
+		storage.values.set("state:manifest", {
+			format: "chunked-json-v1",
+			generation: 0,
+			chunks: Number.MAX_SAFE_INTEGER,
+		});
+
+		await expect(
+			loadChunkedValue(storage, "state", z.unknown()),
+		).rejects.toThrow();
 	});
 
 	it("rejects a chunked value when one of its chunks is missing", async () => {
@@ -139,7 +165,28 @@ describe("chunked storage", () => {
 		});
 	});
 
-	it("cleans partial chunks when a failed replacement is retried", async () => {
+	it("cleans chunks from a failed multi-batch write when retried", async () => {
+		const storage = new SizeLimitedMemoryStorage(110_000);
+		await saveChunkedValue(storage, "state", { payload: "previous" });
+		storage.writesBeforeFailure = 2;
+		await expect(
+			saveChunkedValue(storage, "state", {
+				payload: "x".repeat(13_200_000),
+			}),
+		).rejects.toThrow("simulated storage failure");
+		expect(
+			[...storage.values.keys()].some((key) => key.startsWith("state:chunk:")),
+		).toBe(true);
+
+		await saveChunkedValue(storage, "state", { payload: "replacement" });
+
+		expect(await loadChunkedValue(storage, "state", z.unknown())).toEqual({
+			payload: "replacement",
+		});
+		expect(storage.values.size).toBe(1);
+	});
+
+	it("cleans pending state when a failed replacement is retried", async () => {
 		const storage = new SizeLimitedMemoryStorage(110_000);
 		await saveChunkedValue(storage, "state", { payload: "previous" });
 		storage.writesBeforeFailure = 1;
