@@ -6,6 +6,7 @@ import {
 	isZoneLevelQuery,
 } from "../cloudflare/client";
 import { isPaidTierGraphQLQuery } from "../cloudflare/queries";
+import { runAlarmWithRecovery } from "../lib/alarm-recovery";
 import {
 	chunkedDurableObjectStorage,
 	loadChunkedValue,
@@ -13,7 +14,7 @@ import {
 } from "../lib/chunked-storage";
 import { accumulateCounterMetrics } from "../lib/counters";
 import { parseCommaSeparated, partitionZonesByTier } from "../lib/filters";
-import { createLogger, type Logger } from "../lib/logger";
+import { configFromEnv, createLogger, type Logger } from "../lib/logger";
 import { getMetricRefreshDelaySeconds } from "../lib/metric-refresh";
 import {
 	type MetricDefinition,
@@ -32,6 +33,7 @@ import {
 } from "../lib/types";
 
 const STATE_KEY = "state";
+const ALARM_RECOVERY_DELAY_MS = 60 * 1000;
 
 /**
  * Maximum allowed hostnames in HOST_METRICS_ALLOWLIST.
@@ -265,14 +267,24 @@ export class MetricExporter extends DurableObject<Env> {
 	 * Triggers metric refresh and reschedules next alarm with jitter.
 	 */
 	override async alarm(): Promise<void> {
-		const config = await getConfig(this.env);
-		const logger = this.createLogger(config);
-		logger.info("Alarm fired, refreshing");
-		const timeRange = getTimeRange(
-			config.scrapeDelaySeconds,
-			config.timeWindowSeconds,
-		);
-		await this.refreshWithTimeRange(timeRange, config, logger);
+		let logger: Logger | undefined;
+
+		await runAlarmWithRecovery({
+			run: async () => {
+				logger = createLogger("metric_exporter_alarm", configFromEnv(this.env));
+				const config = await getConfig(this.env);
+				logger = this.createLogger(config);
+				logger.info("Alarm fired, refreshing");
+				const timeRange = getTimeRange(
+					config.scrapeDelaySeconds,
+					config.timeWindowSeconds,
+				);
+				await this.refreshWithTimeRange(timeRange, config, logger);
+			},
+			getLogger: () => logger,
+			scheduleRecoveryAlarm: () =>
+				this.ctx.storage.setAlarm(Date.now() + ALARM_RECOVERY_DELAY_MS),
+		});
 	}
 
 	/**

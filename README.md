@@ -697,8 +697,9 @@ For mixed accounts (enterprise + free zones), only free zones are skipped—paid
 ```
 
 Counter series are retained for five missed refreshes before being pruned. Metric
-exporter snapshots are persisted in bounded chunks, and product queries denied by
-Cloudflare are retried hourly instead of every refresh interval.
+exporter snapshots are persisted in bounded chunks, product queries denied by
+Cloudflare are retried hourly, and unexpected alarm failures schedule a recovery
+alarm so metric refreshes cannot silently stop.
 
 ## Development
 
