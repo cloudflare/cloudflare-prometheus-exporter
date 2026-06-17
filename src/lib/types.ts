@@ -43,12 +43,21 @@ export const MetricExporterIdSchema = z
 export type MetricExporterId = z.infer<typeof MetricExporterIdSchema>;
 
 /**
- * Zod schema for counter state tracking accumulated total.
- * Cloudflare API returns window-based totals, so we just sum them.
+ * Zod schema for accumulated counter state and stale-series expiry.
+ * Cloudflare API returns window-based totals, so observed values are summed.
  */
 export const CounterStateSchema = z
 	.object({
 		accumulated: z.number(),
+		/**
+		 * Refreshes this series may remain unobserved before it is discarded.
+		 * Optional so state written by earlier exporter versions can be migrated.
+		 */
+		missesRemaining: z.number().int().nonnegative().optional(),
+		/** Query-window identifier last accumulated for at-least-once safety. */
+		lastIngest: z.number().int().nonnegative().optional(),
+		/** Zone label used to isolate expiry during partial query failures. */
+		scope: z.string().optional(),
 	})
 	.readonly();
 

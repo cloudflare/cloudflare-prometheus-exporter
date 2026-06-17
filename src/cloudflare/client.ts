@@ -1,4 +1,4 @@
-import { Client, fetchExchange } from "@urql/core";
+import { Client, type CombinedError, fetchExchange } from "@urql/core";
 import Cloudflare from "cloudflare";
 import DataLoader from "dataloader";
 import z from "zod";
@@ -65,6 +65,14 @@ export {
 } from "./queries";
 
 const API_PAGE_SIZE = 100;
+
+function graphQLQueryError(query: string, error: CombinedError): GraphQLError {
+	return new GraphQLError(
+		`GraphQL error (${query}): ${error.message}`,
+		error.graphQLErrors ?? [],
+		{ context: { query } },
+	);
+}
 
 /**
  * Groups HTTP status code into category string.
@@ -564,8 +572,7 @@ export class CloudflareMetricsClient {
 		});
 
 		if (result.error) {
-			this.logger.error("GraphQL error", { error: result.error.message });
-			return [];
+			throw graphQLQueryError("worker-totals", result.error);
 		}
 
 		const metrics: MetricDefinition[] = [];
@@ -674,8 +681,7 @@ export class CloudflareMetricsClient {
 		});
 
 		if (result.error) {
-			this.logger.error("GraphQL error", { error: result.error.message });
-			return [];
+			throw graphQLQueryError("logpush-account", result.error);
 		}
 
 		const metric: MetricDefinition = {
@@ -723,8 +729,7 @@ export class CloudflareMetricsClient {
 		});
 
 		if (result.error) {
-			this.logger.error("GraphQL error", { error: result.error.message });
-			return [];
+			throw graphQLQueryError("magic-transit", result.error);
 		}
 
 		const activeTunnels: MetricDefinition = {
@@ -916,10 +921,7 @@ export class CloudflareMetricsClient {
 		});
 
 		if (result.error) {
-			this.logger.error("GraphQL error (magic-transit-slo)", {
-				error: result.error.message,
-			});
-			return [];
+			throw graphQLQueryError("magic-transit-slo", result.error);
 		}
 
 		const sloStatus: MetricDefinition = {
@@ -1049,10 +1051,7 @@ export class CloudflareMetricsClient {
 		});
 
 		if (result.error) {
-			this.logger.error("GraphQL error (magic-transit-traffic)", {
-				error: result.error.message,
-			});
-			return [];
+			throw graphQLQueryError("magic-transit-traffic", result.error);
 		}
 
 		const bits: MetricDefinition = {
@@ -1114,10 +1113,7 @@ export class CloudflareMetricsClient {
 		});
 
 		if (result.error) {
-			this.logger.error("GraphQL error (magic-firewall-samples)", {
-				error: result.error.message,
-			});
-			return [];
+			throw graphQLQueryError("magic-firewall-samples", result.error);
 		}
 
 		const bits: MetricDefinition = {
@@ -1178,10 +1174,7 @@ export class CloudflareMetricsClient {
 		});
 
 		if (result.error) {
-			this.logger.error("GraphQL error (network-analytics)", {
-				error: result.error.message,
-			});
-			return [];
+			throw graphQLQueryError("network-analytics", result.error);
 		}
 
 		const metrics: MetricDefinition[] = [];
@@ -1335,11 +1328,7 @@ export class CloudflareMetricsClient {
 			limit: this.config.queryLimit,
 		});
 		if (result.error) {
-			this.logger.error("GraphQL error (stream-video-playback)", {
-				account: normalizedAccount,
-				error: result.error.message,
-			});
-			return [];
+			throw graphQLQueryError("stream-video-playback", result.error);
 		}
 
 		const playbackCount: MetricDefinition = {
@@ -1397,11 +1386,7 @@ export class CloudflareMetricsClient {
 		});
 
 		if (result.error) {
-			this.logger.error("GraphQL error (stream-live-inputs)", {
-				account: normalizedAccount,
-				error: result.error.message,
-			});
-			return [];
+			throw graphQLQueryError("stream-live-inputs", result.error);
 		}
 
 		const segments: MetricDefinition = {
@@ -1612,13 +1597,10 @@ export class CloudflareMetricsClient {
 			result = await this.gql.query(HTTPMetricsQueryNoBots, queryVars);
 		}
 
-		// Safety net: free tier zones should be filtered upstream, but handle gracefully
+		// Safety net: free tier zones should be filtered upstream. Surface access
+		// failures so the exporter can back off rather than retry every minute.
 		if (result.error?.message.includes("does not have access to the path")) {
-			this.logger.error(
-				"Zone(s) lack GraphQL analytics access - ensure free tier zones are filtered",
-				{ error: result.error.message },
-			);
-			return [];
+			throw graphQLQueryError("http-metrics", result.error);
 		}
 
 		if (result.error) {
@@ -2045,7 +2027,7 @@ export class CloudflareMetricsClient {
 		});
 
 		if (result.error) {
-			throw new Error(`GraphQL error: ${result.error.message}`);
+			throw graphQLQueryError("adaptive-metrics", result.error);
 		}
 
 		const error4xx: MetricDefinition = {
@@ -2151,7 +2133,7 @@ export class CloudflareMetricsClient {
 		});
 
 		if (result.error) {
-			throw new Error(`GraphQL error: ${result.error.message}`);
+			throw graphQLQueryError("edge-country-metrics", result.error);
 		}
 
 		const statusCountryHost: MetricDefinition = {
@@ -2239,7 +2221,7 @@ export class CloudflareMetricsClient {
 		});
 
 		if (result.error) {
-			throw new Error(`GraphQL error: ${result.error.message}`);
+			throw graphQLQueryError("colo-metrics", result.error);
 		}
 
 		const visits: MetricDefinition = {
@@ -2315,7 +2297,7 @@ export class CloudflareMetricsClient {
 		});
 
 		if (result.error) {
-			throw new Error(`GraphQL error: ${result.error.message}`);
+			throw graphQLQueryError("colo-error-metrics", result.error);
 		}
 
 		const visitsError: MetricDefinition = {
@@ -2392,7 +2374,7 @@ export class CloudflareMetricsClient {
 		});
 
 		if (result.error) {
-			throw new Error(`GraphQL error: ${result.error.message}`);
+			throw graphQLQueryError("request-method-metrics", result.error);
 		}
 
 		const methodCount: MetricDefinition = {
@@ -3012,7 +2994,7 @@ export class CloudflareMetricsClient {
 		});
 
 		if (result.error) {
-			throw new Error(`GraphQL error: ${result.error.message}`);
+			throw graphQLQueryError("logpush-zone", result.error);
 		}
 
 		const failedJobs: MetricDefinition = {
@@ -3065,7 +3047,7 @@ export class CloudflareMetricsClient {
 		});
 
 		if (result.error) {
-			throw new Error(`GraphQL error: ${result.error.message}`);
+			throw graphQLQueryError("origin-status-metrics", result.error);
 		}
 
 		const originStatusCountryHost: MetricDefinition = {
