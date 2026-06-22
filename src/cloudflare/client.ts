@@ -38,7 +38,12 @@ import {
 	MagicTransitMetricsQuery,
 	MagicTransitSLOMetricsQuery,
 	MagicTransitTunnelTrafficQuery,
-	NetworkAnalyticsQuery,
+	NetworkAnalyticsDnsProtectionQuery,
+	NetworkAnalyticsDosdQuery,
+	NetworkAnalyticsIDPSQuery,
+	NetworkAnalyticsMagicFirewallQuery,
+	NetworkAnalyticsMagicTransitQuery,
+	NetworkAnalyticsTcpProtectionQuery,
 	OriginStatusMetricsQuery,
 	RequestMethodMetricsQuery,
 	StreamLiveInputsQuery,
@@ -195,6 +200,12 @@ export class CloudflareMetricsClient {
 	// DataLoader for batched parallel REST calls (firewall rules benefit from
 	// batching in AccountMetricCoordinator where Promise.all fires multiple calls)
 	private readonly firewallRulesLoader: DataLoader<string, Map<string, string>>;
+
+	// Network-analytics datasets that returned an entitlement error
+	// ("does not have access to the path"). Cached in-memory per client instance
+	// so denied datasets are skipped on subsequent refreshes instead of wasting
+	// GraphQL rate-limit budget on a call that will always be denied.
+	private readonly deniedNetworkAnalyticsDatasets = new Set<string>();
 
 	constructor(config: CloudflareMetricsClientConfig) {
 		this.config = config;
@@ -1166,82 +1177,196 @@ export class CloudflareMetricsClient {
 		normalizedAccount: string,
 		timeRange: { mintime: string; maxtime: string },
 	): Promise<MetricDefinition[]> {
-		const result = await this.gql.query(NetworkAnalyticsQuery, {
+		const vars = {
 			accountID: accountId,
 			mintime: timeRange.mintime,
 			maxtime: timeRange.maxtime,
 			limit: this.config.queryLimit,
-		});
-
-		if (result.error) {
-			throw graphQLQueryError("network-analytics", result.error);
-		}
-
+		};
 		const metrics: MetricDefinition[] = [];
 
-		for (const accountData of result.data?.viewer?.accounts ?? []) {
-			// -- Magic Transit --
-			this.collectNetworkAnalyticsDataset(
-				accountData.magicTransitNetworkAnalyticsAdaptiveGroups ?? [],
-				"magic_transit",
-				"Magic Transit",
-				normalizedAccount,
-				metrics,
-				(dims) => ({
-					mitigation_system: dims.mitigationSystem ?? "",
-				}),
-			);
+		// Each NAv2 dataset is queried independently so a per-dataset
+		// authorization error (account not entitled to that product) does not
+		// null-bubble and discard the datasets the account IS entitled to.
 
-			// -- Magic Firewall --
-			this.collectNetworkAnalyticsDataset(
-				accountData.magicFirewallNetworkAnalyticsAdaptiveGroups ?? [],
-				"magic_firewall",
-				"Magic Firewall",
-				normalizedAccount,
-				metrics,
+		// -- Magic Transit --
+		if (this.shouldQueryNetworkAnalytics(accountId, "magic_transit")) {
+			const result = await this.gql.query(
+				NetworkAnalyticsMagicTransitQuery,
+				vars,
 			);
+			if (
+				this.handleNetworkAnalyticsResult(result, accountId, "magic_transit")
+			) {
+				for (const accountData of result.data?.viewer?.accounts ?? []) {
+					this.collectNetworkAnalyticsDataset(
+						accountData.magicTransitNetworkAnalyticsAdaptiveGroups ?? [],
+						"magic_transit",
+						"Magic Transit",
+						normalizedAccount,
+						metrics,
+						(dims) => ({
+							mitigation_system: dims.mitigationSystem ?? "",
+						}),
+					);
+				}
+			}
+		}
 
-			// -- DDoS Defense (dosd) --
-			this.collectNetworkAnalyticsDataset(
-				accountData.dosdNetworkAnalyticsAdaptiveGroups ?? [],
-				"dosd",
-				"DDoS defense",
-				normalizedAccount,
-				metrics,
-				(dims) => ({
-					attack_vector: dims.attackVector ?? "",
-				}),
+		// -- Magic Firewall --
+		if (this.shouldQueryNetworkAnalytics(accountId, "magic_firewall")) {
+			const result = await this.gql.query(
+				NetworkAnalyticsMagicFirewallQuery,
+				vars,
 			);
+			if (
+				this.handleNetworkAnalyticsResult(result, accountId, "magic_firewall")
+			) {
+				for (const accountData of result.data?.viewer?.accounts ?? []) {
+					this.collectNetworkAnalyticsDataset(
+						accountData.magicFirewallNetworkAnalyticsAdaptiveGroups ?? [],
+						"magic_firewall",
+						"Magic Firewall",
+						normalizedAccount,
+						metrics,
+					);
+				}
+			}
+		}
 
-			// -- IDPS --
-			this.collectNetworkAnalyticsDataset(
-				accountData.magicIDPSNetworkAnalyticsAdaptiveGroups ?? [],
-				"idps",
-				"Intrusion detection",
-				normalizedAccount,
-				metrics,
-			);
+		// -- DDoS Defense (dosd) --
+		if (this.shouldQueryNetworkAnalytics(accountId, "dosd")) {
+			const result = await this.gql.query(NetworkAnalyticsDosdQuery, vars);
+			if (this.handleNetworkAnalyticsResult(result, accountId, "dosd")) {
+				for (const accountData of result.data?.viewer?.accounts ?? []) {
+					this.collectNetworkAnalyticsDataset(
+						accountData.dosdNetworkAnalyticsAdaptiveGroups ?? [],
+						"dosd",
+						"DDoS defense",
+						normalizedAccount,
+						metrics,
+						(dims) => ({
+							attack_vector: dims.attackVector ?? "",
+						}),
+					);
+				}
+			}
+		}
 
-			// -- Advanced TCP Protection --
-			this.collectNetworkAnalyticsDataset(
-				accountData.advancedTcpProtectionNetworkAnalyticsAdaptiveGroups ?? [],
-				"tcp_protection",
-				"Advanced TCP protection",
-				normalizedAccount,
-				metrics,
-			);
+		// -- IDPS --
+		if (this.shouldQueryNetworkAnalytics(accountId, "idps")) {
+			const result = await this.gql.query(NetworkAnalyticsIDPSQuery, vars);
+			if (this.handleNetworkAnalyticsResult(result, accountId, "idps")) {
+				for (const accountData of result.data?.viewer?.accounts ?? []) {
+					this.collectNetworkAnalyticsDataset(
+						accountData.magicIDPSNetworkAnalyticsAdaptiveGroups ?? [],
+						"idps",
+						"Intrusion detection",
+						normalizedAccount,
+						metrics,
+					);
+				}
+			}
+		}
 
-			// -- Advanced DNS Protection --
-			this.collectNetworkAnalyticsDataset(
-				accountData.advancedDnsProtectionNetworkAnalyticsAdaptiveGroups ?? [],
-				"dns_protection",
-				"Advanced DNS protection",
-				normalizedAccount,
-				metrics,
+		// -- Advanced TCP Protection --
+		if (this.shouldQueryNetworkAnalytics(accountId, "tcp_protection")) {
+			const result = await this.gql.query(
+				NetworkAnalyticsTcpProtectionQuery,
+				vars,
 			);
+			if (
+				this.handleNetworkAnalyticsResult(result, accountId, "tcp_protection")
+			) {
+				for (const accountData of result.data?.viewer?.accounts ?? []) {
+					this.collectNetworkAnalyticsDataset(
+						accountData.advancedTcpProtectionNetworkAnalyticsAdaptiveGroups ??
+							[],
+						"tcp_protection",
+						"Advanced TCP protection",
+						normalizedAccount,
+						metrics,
+					);
+				}
+			}
+		}
+
+		// -- Advanced DNS Protection --
+		if (this.shouldQueryNetworkAnalytics(accountId, "dns_protection")) {
+			const result = await this.gql.query(
+				NetworkAnalyticsDnsProtectionQuery,
+				vars,
+			);
+			if (
+				this.handleNetworkAnalyticsResult(result, accountId, "dns_protection")
+			) {
+				for (const accountData of result.data?.viewer?.accounts ?? []) {
+					this.collectNetworkAnalyticsDataset(
+						accountData.advancedDnsProtectionNetworkAnalyticsAdaptiveGroups ??
+							[],
+						"dns_protection",
+						"Advanced DNS protection",
+						normalizedAccount,
+						metrics,
+					);
+				}
+			}
 		}
 
 		return metrics.filter((m) => m.values.length > 0);
+	}
+
+	/**
+	 * Whether a network-analytics dataset should be queried for an account.
+	 * Returns false if the dataset was previously denied (account not entitled),
+	 * so we don't waste GraphQL rate-limit budget re-querying it.
+	 *
+	 * @param accountId Cloudflare account ID.
+	 * @param slug Dataset slug (e.g. "magic_transit", "dosd").
+	 * @returns True if the dataset should be queried.
+	 */
+	private shouldQueryNetworkAnalytics(
+		accountId: string,
+		slug: string,
+	): boolean {
+		return !this.deniedNetworkAnalyticsDatasets.has(`${accountId}:${slug}`);
+	}
+
+	/**
+	 * Handles a per-dataset network-analytics query result.
+	 *
+	 * Returns true if the caller should collect metrics from `result.data`. On an
+	 * entitlement error ("does not have access to the path") the dataset is cached
+	 * as denied so it is skipped on subsequent refreshes. Transient errors (rate
+	 * limits, network) are logged but not cached, so they are retried next cycle.
+	 *
+	 * @param result GraphQL operation result (only `error` is inspected).
+	 * @param accountId Cloudflare account ID.
+	 * @param slug Dataset slug.
+	 * @returns True if metrics should be collected from the result.
+	 */
+	private handleNetworkAnalyticsResult(
+		result: { error?: { message: string } | null },
+		accountId: string,
+		slug: string,
+	): boolean {
+		if (result.error) {
+			if (result.error.message.includes("does not have access to the path")) {
+				this.deniedNetworkAnalyticsDatasets.add(`${accountId}:${slug}`);
+				this.logger.info(
+					"Network analytics dataset not available for account; skipping",
+					{ account_id: accountId, dataset: slug },
+				);
+			} else {
+				this.logger.warn("Network analytics dataset query failed", {
+					account_id: accountId,
+					dataset: slug,
+					error: result.error.message,
+				});
+			}
+			return false;
+		}
+		return true;
 	}
 
 	/**
