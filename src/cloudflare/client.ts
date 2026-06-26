@@ -2629,6 +2629,12 @@ export class CloudflareMetricsClient {
 			type: "gauge",
 			values: [],
 		};
+		const hostnameContentCacheStatus: MetricDefinition = {
+			name: "cloudflare_zone_hostname_content_cache_status",
+			help: "Requests per hostname by cache status and response content type in the last completed minute",
+			type: "gauge",
+			values: [],
+		};
 		const hostnameEdgeTtfb: MetricDefinition = {
 			name: "cloudflare_zone_hostname_edge_ttfb_seconds",
 			help: "Average edge time to first byte per hostname in seconds (last completed minute)",
@@ -2721,6 +2727,28 @@ export class CloudflareMetricsClient {
 				}
 			}
 
+			// Requests by cache status and response content type per host
+			for (const group of zoneData.hostContentCache ?? []) {
+				const host = (
+					group.dimensions?.clientRequestHTTPHost ?? ""
+				).toLowerCase();
+				const cacheStatus = group.dimensions?.cacheStatus ?? "";
+				const contentType =
+					group.dimensions?.edgeResponseContentTypeName ?? "";
+				const count = group.count ?? 0;
+				if (count > 0) {
+					hostnameContentCacheStatus.values.push({
+						labels: {
+							zone: zoneName,
+							host,
+							content_type: contentType,
+							cache_status: cacheStatus,
+						},
+						value: count,
+					});
+				}
+			}
+
 			// Latency per host: averages (primary alerting metric) + percentiles (separate families)
 			for (const group of zoneData.hostLatency ?? []) {
 				const host = (
@@ -2781,6 +2809,10 @@ export class CloudflareMetricsClient {
 				{ name: "hostRequests", len: zoneData.hostRequests?.length ?? 0 },
 				{ name: "hostStatus", len: zoneData.hostStatus?.length ?? 0 },
 				{ name: "hostCache", len: zoneData.hostCache?.length ?? 0 },
+				{
+					name: "hostContentCache",
+					len: zoneData.hostContentCache?.length ?? 0,
+				},
 				{ name: "hostLatency", len: zoneData.hostLatency?.length ?? 0 },
 			];
 			for (const alias of aliases) {
@@ -2816,6 +2848,7 @@ export class CloudflareMetricsClient {
 			hostnameRequests,
 			hostnameStatus,
 			hostnameCacheStatus,
+			hostnameContentCacheStatus,
 			hostnameEdgeTtfb,
 			hostnameEdgeTtfbP50,
 			hostnameEdgeTtfbP95,

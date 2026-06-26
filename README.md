@@ -429,6 +429,7 @@ All hostname metrics are **gauge snapshots** of the **last completed minute**, d
 | `cloudflare_zone_hostname_requests` | gauge | zone, host | Total requests in the last completed minute |
 | `cloudflare_zone_hostname_requests_by_status` | gauge | zone, host, status | Requests by HTTP status code |
 | `cloudflare_zone_hostname_cache_status` | gauge | zone, host, cache_status | Requests by cache status (hit/miss/etc.) |
+| `cloudflare_zone_hostname_content_cache_status` | gauge | zone, host, content_type, cache_status | Requests by cache status broken down by response content type (e.g. json, html) |
 
 **Latency (averages — primary alerting metrics):**
 
