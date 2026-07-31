@@ -231,8 +231,9 @@ export class MetricExporter extends DurableObject<Env> {
 			return;
 		}
 
-		const isFirstContext =
-			state.zones.length === 0 && zones.length > 0 && state.lastRefresh === 0;
+		// accountId === "" means this is genuinely the first context push, as
+		// opposed to a legitimate zero-zone account (e.g. Magic Transit-only).
+		const isFirstContext = state.accountId === "" && state.lastRefresh === 0;
 
 		const updatedState: MetricExporterState = {
 			...state,
@@ -349,9 +350,11 @@ export class MetricExporter extends DurableObject<Env> {
 	): Promise<void> {
 		const state = this.getState();
 
-		// Skip if zone context not yet pushed (account-scoped needs zones)
-		if (state.scopeType === "account" && state.zones.length === 0) {
-			logger.info("Skipping refresh - no zone context yet");
+		// Skip if account context not yet pushed. Checks accountId rather than
+		// zones.length so account-level-only queries (e.g. magic-transit) still
+		// run for accounts with zero zones.
+		if (state.scopeType === "account" && state.accountId === "") {
+			logger.info("Skipping refresh - no account context yet");
 			await this.scheduleNextAlarm(config);
 			return;
 		}
