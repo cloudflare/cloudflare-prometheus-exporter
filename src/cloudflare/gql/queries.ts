@@ -977,3 +977,80 @@ export const StreamLiveInputsQuery = graphql(`
     }
   }
 `);
+
+/**
+ * Cloudflare Queues metrics.
+ * Fetches backlog, delayed backlog, consumer concurrency, and message
+ * operations in one query. A queue with no reads or writes in the window
+ * returns no backlog rows, even if it holds messages.
+ */
+export const QueuesQuery = graphql(`
+  query QueuesMetrics(
+    $accountID: string!
+    $limit: uint64!
+    $mintime: Time!
+    $maxtime: Time!
+  ) {
+    viewer {
+      accounts(filter: { accountTag: $accountID }) {
+        queueBacklogAdaptiveGroups(
+          limit: $limit
+          filter: { datetime_geq: $mintime, datetime_lt: $maxtime }
+        ) {
+          avg {
+            messages
+            bytes
+          }
+          dimensions {
+            queueId
+          }
+        }
+        queueDelayedBacklogAdaptiveGroups(
+          limit: $limit
+          filter: { datetime_geq: $mintime, datetime_lt: $maxtime }
+        ) {
+          avg {
+            messages
+          }
+          dimensions {
+            queueId
+          }
+        }
+        queueConsumerMetricsAdaptiveGroups(
+          limit: $limit
+          filter: { datetime_geq: $mintime, datetime_lt: $maxtime }
+        ) {
+          avg {
+            concurrency
+          }
+          dimensions {
+            queueId
+          }
+        }
+        queueMessageOperationsAdaptiveGroups(
+          limit: $limit
+          filter: { datetime_geq: $mintime, datetime_lt: $maxtime }
+        ) {
+          count
+          sum {
+            billableOperations
+            bytes
+          }
+          avg {
+            lagTime
+            retryCount
+          }
+          max {
+            messageSize
+          }
+          dimensions {
+            queueId
+            actionType
+            consumerType
+            outcome
+          }
+        }
+      }
+    }
+  }
+`);

@@ -8,7 +8,7 @@ Export Cloudflare metrics to Prometheus. Built on Cloudflare Workers with Durabl
 
 ## Features
 
-- **90+ Prometheus metrics** - requests, bandwidth, threats, workers, load balancers, SSL certs, hostname-level analytics, network analytics, Magic Transit tunnel health/traffic/SLO, Magic Firewall per-rule visibility, stream video/live, and more
+- **90+ Prometheus metrics** - requests, bandwidth, threats, workers, load balancers, SSL certs, hostname-level analytics, network analytics, Magic Transit tunnel health/traffic/SLO, Magic Firewall per-rule visibility, stream video/live, queues backlog/operations, and more
 - **Cloudflare Workers** - serverless edge deployment
 - **Durable Objects** - stateful counter accumulation for proper Prometheus semantics
 - **Background refresh** - alarms fetch data every 60s; scrapes return cached data instantly
@@ -416,6 +416,32 @@ Traffic volume metrics across Cloudflare's Network Analytics v2 datasets. All ar
 | `cloudflare_stream_live_input_gop_duration_seconds` | gauge | account, event_code |
 | `cloudflare_stream_live_input_upload_duration_ratio` | gauge | account, event_code |
 
+### Images Metrics
+
+| Metric | Type | Labels |
+|--------|------|--------|
+| `cloudflare_images_count_current` | gauge | account |
+| `cloudflare_images_count_allowed` | gauge | account |
+
+### Queues Metrics
+
+Requires the Workers Paid plan. The `queue` label is the queue name, or the
+queue ID if the name lookup fails. A queue with no reads or writes in the
+window emits no backlog series, even if it holds messages.
+
+| Metric | Type | Labels |
+|--------|------|--------|
+| `cloudflare_queue_backlog_messages` | gauge | account, queue |
+| `cloudflare_queue_backlog_bytes` | gauge | account, queue |
+| `cloudflare_queue_delayed_backlog_messages` | gauge | account, queue |
+| `cloudflare_queue_consumer_concurrency` | gauge | account, queue |
+| `cloudflare_queue_message_operations_total` | counter | account, queue, action_type, consumer_type, outcome |
+| `cloudflare_queue_message_operations_bytes_total` | counter | account, queue, action_type, consumer_type, outcome |
+| `cloudflare_queue_billable_operations_total` | counter | account, queue, action_type, consumer_type, outcome |
+| `cloudflare_queue_message_lag_seconds` | gauge | account, queue, action_type, consumer_type, outcome |
+| `cloudflare_queue_message_retries` | gauge | account, queue, action_type, consumer_type, outcome |
+| `cloudflare_queue_message_size_max_bytes` | gauge | account, queue, action_type, consumer_type, outcome |
+
 ### Hostname Metrics
 
 Requires `HOST_METRICS_ALLOWLIST` to be set (max 50 hostnames). Disabled when `EXCLUDE_HOST=true`.
@@ -528,15 +554,15 @@ For mixed accounts (enterprise + free zones), only free zones are skipped—paid
 │   ▼            ▼      ▼            ▼      ▼            ▼                       │
 │ ┌─────┐    ┌─────┐  ┌─────┐    ┌─────┐  ┌─────┐    ┌─────┐                     │
 │ │Exprt│    │Exprt│  │Exprt│    │Exprt│  │Exprt│    │Exprt│                     │
-│ │(21) │ .. │(N)  │  │(21) │ .. │(N)  │  │(21) │ .. │(N)  │                     │
+│ │(23) │ .. │(N)  │  │(23) │ .. │(N)  │  │(23) │ .. │(N)  │                     │
 │ │acct │    │zone │  │acct │    │zone │  │acct │    │zone │                     │
 │ └─────┘    └─────┘  └─────┘    └─────┘  └─────┘    └─────┘                     │
 │                                                                                │
 │  MetricExporter DOs (per account):                                             │
-│  - Account-scoped (21): worker-totals, logpush-account, magic-transit,         │
+│  - Account-scoped (23): worker-totals, logpush-account, magic-transit,         │
 │    magic-transit-slo, magic-transit-traffic, magic-firewall-samples,           │
-│    network-analytics, stream-video-playback, stream-live-inputs,              │
-│    http-metrics, adaptive-metrics, edge-country-metrics,                      │
+│    network-analytics, stream-video-playback, stream-live-inputs,               │
+│    images, queues, http-metrics, adaptive-metrics, edge-country-metrics,       │
 │    colo-metrics, colo-error-metrics, request-method-metrics,                   │
 │    health-check-metrics, load-balancer-metrics, logpush-zone,                  │
 │    origin-status-metrics, cache-miss-metrics, hostname-http-metrics            │
@@ -665,8 +691,8 @@ For mixed accounts (enterprise + free zones), only free zones are skipped—paid
 ┌────────────────────────────────────────────────────────────────────────┐
 │           MetricExporter.refresh() for account-scoped queries          │
 │                                                                        │
-│  Query Types (21 total):                                               │
-│  ├── ACCOUNT-LEVEL (single account per query, 9):                      │
+│  Query Types (23 total):                                               │
+│  ├── ACCOUNT-LEVEL (single account per query, 11):                     │
 │  │   ├── worker-totals                                                 │
 │  │   ├── logpush-account                                               │
 │  │   ├── magic-transit                                                 │
@@ -675,7 +701,9 @@ For mixed accounts (enterprise + free zones), only free zones are skipped—paid
 │  │   ├── magic-firewall-samples                                        │
 │  │   ├── network-analytics                                             │
 │  │   ├── stream-video-playback                                         │
-│  │   └── stream-live-inputs                                            │
+│  │   ├── stream-live-inputs                                            │
+│  │   ├── images                                                        │
+│  │   └── queues                                                        │
 │  │                                                                     │
 │  └── ZONE-LEVEL (all zones batched in one query, 12):                  │
 │      ├── http-metrics                                                  │

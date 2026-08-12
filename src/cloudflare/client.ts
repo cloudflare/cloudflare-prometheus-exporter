@@ -40,6 +40,7 @@ import {
 	MagicTransitTunnelTrafficQuery,
 	NetworkAnalyticsQuery,
 	OriginStatusMetricsQuery,
+	QueuesQuery,
 	RequestMethodMetricsQuery,
 	StreamLiveInputsQuery,
 	StreamVideoPlaybackQuery,
@@ -544,6 +545,8 @@ export class CloudflareMetricsClient {
 				);
 			case "images":
 				return this.getImagesMetrics(accountId, normalizedAccount);
+			case "queues":
+				return this.getQueuesMetrics(accountId, normalizedAccount, timeRange);
 			default: {
 				const _exhaustive: never = query;
 				throw new Error(`Unknown account metric query: ${_exhaustive}`);
@@ -1486,6 +1489,213 @@ export class CloudflareMetricsClient {
 		}
 
 		return [countCurrent, countAllowed].filter((m) => m.values.length > 0);
+	}
+
+	/**
+	 * Lists queue names for an account, keyed by queue ID.
+	 * Returns an empty map on error so labels fall back to queue IDs.
+	 */
+	private async getQueueNames(accountId: string): Promise<Map<string, string>> {
+		const names = new Map<string, string>();
+		try {
+			for await (const queue of this.api.queues.list({
+				account_id: accountId,
+			})) {
+				if (queue.queue_id != null && queue.queue_name != null) {
+					names.set(queue.queue_id, queue.queue_name);
+				}
+			}
+		} catch (error) {
+			const msg = error instanceof Error ? error.message : String(error);
+			this.logger.error("Failed to list queues", {
+				account_id: accountId,
+				error: msg,
+			});
+		}
+		return names;
+	}
+
+	/**
+	 * Fetches Cloudflare Queues metrics: backlog, delayed backlog, consumer
+	 * concurrency, and message operations.
+	 * Backlog values are averages over the query window. A queue with no
+	 * reads or writes in the window returns no backlog rows.
+	 *
+	 * @param accountId Cloudflare account ID.
+	 * @param normalizedAccount Normalized account name for labels.
+	 * @param timeRange Query time range.
+	 */
+	private async getQueuesMetrics(
+		accountId: string,
+		normalizedAccount: string,
+		timeRange: { mintime: string; maxtime: string },
+	): Promise<MetricDefinition[]> {
+		const result = await this.gql.query(QueuesQuery, {
+			accountID: accountId,
+			mintime: timeRange.mintime,
+			maxtime: timeRange.maxtime,
+			limit: this.config.queryLimit,
+		});
+		if (result.error) {
+			throw graphQLQueryError("queues", result.error);
+		}
+
+		const accounts = result.data?.viewer?.accounts ?? [];
+		const hasRows = accounts.some(
+			(accountData) =>
+				(accountData.queueBacklogAdaptiveGroups?.length ?? 0) > 0 ||
+				(accountData.queueDelayedBacklogAdaptiveGroups?.length ?? 0) > 0 ||
+				(accountData.queueConsumerMetricsAdaptiveGroups?.length ?? 0) > 0 ||
+				(accountData.queueMessageOperationsAdaptiveGroups?.length ?? 0) > 0,
+		);
+		if (!hasRows) return [];
+
+		const queueNames = await this.getQueueNames(accountId);
+		const queueLabels = (queueId: string) => ({
+			account: normalizedAccount,
+			queue: queueNames.get(queueId) ?? queueId,
+		});
+
+		const backlogMessages: MetricDefinition = {
+			name: "cloudflare_queue_backlog_messages",
+			help: "Average number of messages in the queue backlog",
+			type: "gauge",
+			values: [],
+		};
+		const backlogBytes: MetricDefinition = {
+			name: "cloudflare_queue_backlog_bytes",
+			help: "Average size of the queue backlog in bytes",
+			type: "gauge",
+			values: [],
+		};
+		const delayedMessages: MetricDefinition = {
+			name: "cloudflare_queue_delayed_backlog_messages",
+			help: "Average number of delayed messages in the queue backlog",
+			type: "gauge",
+			values: [],
+		};
+		const concurrency: MetricDefinition = {
+			name: "cloudflare_queue_consumer_concurrency",
+			help: "Average number of concurrent queue consumers",
+			type: "gauge",
+			values: [],
+		};
+		const operations: MetricDefinition = {
+			name: "cloudflare_queue_message_operations_total",
+			help: "Total number of queue message operations",
+			type: "counter",
+			values: [],
+		};
+		const operationBytes: MetricDefinition = {
+			name: "cloudflare_queue_message_operations_bytes_total",
+			help: "Total size of queue message operations in bytes",
+			type: "counter",
+			values: [],
+		};
+		const billableOperations: MetricDefinition = {
+			name: "cloudflare_queue_billable_operations_total",
+			help: "Total number of billable queue operations",
+			type: "counter",
+			values: [],
+		};
+		const lagSeconds: MetricDefinition = {
+			name: "cloudflare_queue_message_lag_seconds",
+			help: "Average time in seconds between message write and this operation",
+			type: "gauge",
+			values: [],
+		};
+		const retries: MetricDefinition = {
+			name: "cloudflare_queue_message_retries",
+			help: "Average number of retries per queue message operation",
+			type: "gauge",
+			values: [],
+		};
+		const maxMessageSize: MetricDefinition = {
+			name: "cloudflare_queue_message_size_max_bytes",
+			help: "Largest queue message size in bytes seen in the window",
+			type: "gauge",
+			values: [],
+		};
+
+		for (const accountData of accounts) {
+			for (const group of accountData.queueBacklogAdaptiveGroups ?? []) {
+				const dims = group.dimensions;
+				if (dims == null) continue;
+
+				const labels = queueLabels(dims.queueId ?? "");
+				backlogMessages.values.push({
+					labels,
+					value: group.avg?.messages ?? 0,
+				});
+				backlogBytes.values.push({ labels, value: group.avg?.bytes ?? 0 });
+			}
+
+			for (const group of accountData.queueDelayedBacklogAdaptiveGroups ?? []) {
+				const dims = group.dimensions;
+				if (dims == null) continue;
+
+				delayedMessages.values.push({
+					labels: queueLabels(dims.queueId ?? ""),
+					value: group.avg?.messages ?? 0,
+				});
+			}
+
+			for (const group of accountData.queueConsumerMetricsAdaptiveGroups ??
+				[]) {
+				const dims = group.dimensions;
+				if (dims == null) continue;
+
+				concurrency.values.push({
+					labels: queueLabels(dims.queueId ?? ""),
+					value: group.avg?.concurrency ?? 0,
+				});
+			}
+
+			for (const group of accountData.queueMessageOperationsAdaptiveGroups ??
+				[]) {
+				const dims = group.dimensions;
+				if (dims == null) continue;
+
+				const labels = {
+					...queueLabels(dims.queueId ?? ""),
+					action_type: dims.actionType ?? "",
+					consumer_type: dims.consumerType ?? "",
+					outcome: dims.outcome ?? "",
+				};
+
+				operations.values.push({ labels, value: group.count ?? 0 });
+				operationBytes.values.push({
+					labels,
+					value: group.sum?.bytes ?? 0,
+				});
+				billableOperations.values.push({
+					labels,
+					value: group.sum?.billableOperations ?? 0,
+				});
+				lagSeconds.values.push({
+					labels,
+					value: (group.avg?.lagTime ?? 0) / 1000,
+				});
+				retries.values.push({ labels, value: group.avg?.retryCount ?? 0 });
+				maxMessageSize.values.push({
+					labels,
+					value: group.max?.messageSize ?? 0,
+				});
+			}
+		}
+
+		return [
+			backlogMessages,
+			backlogBytes,
+			delayedMessages,
+			concurrency,
+			operations,
+			operationBytes,
+			billableOperations,
+			lagSeconds,
+			retries,
+			maxMessageSize,
+		].filter((m) => m.values.length > 0);
 	}
 
 	/**
