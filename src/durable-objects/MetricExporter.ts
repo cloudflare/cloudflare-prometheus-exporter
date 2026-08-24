@@ -594,6 +594,7 @@ export class MetricExporter extends DurableObject<Env> {
 						timeRange,
 						hostMetricsAllowlist,
 						hostMetricsDelaySeconds,
+						config.httpStatusGroup,
 					),
 					partialErrors: [],
 					failedScopes: new Set(),
@@ -639,6 +640,7 @@ export class MetricExporter extends DurableObject<Env> {
 						timeRange,
 						hostMetricsAllowlist,
 						hostMetricsDelaySeconds,
+						config.httpStatusGroup,
 					);
 					for (const zoneId of chunkIds) delete zoneRetryAfter[zoneId];
 					chunkResults.push(metrics);
