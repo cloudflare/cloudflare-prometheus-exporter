@@ -1499,6 +1499,7 @@ export class CloudflareMetricsClient {
 	 * @param timeRange Shared time range for query alignment.
 	 * @param hostMetricsAllowlist Allowed hostnames for hostname-http-metrics query.
 	 * @param hostMetricsDelaySeconds Ingestion delay override for hostname metrics.
+	 * @param httpStatusGroup Whether to group HTTP response statuses by class.
 	 * @returns Promise of metric definitions for the zones.
 	 * @throws {Error} When unknown query type provided.
 	 */
@@ -1510,6 +1511,7 @@ export class CloudflareMetricsClient {
 		timeRange: TimeRange,
 		hostMetricsAllowlist?: ReadonlySet<string>,
 		hostMetricsDelaySeconds?: number,
+		httpStatusGroup = false,
 	): Promise<MetricDefinition[]> {
 		this.logger.info("Fetching zone metrics", {
 			query,
@@ -1523,6 +1525,7 @@ export class CloudflareMetricsClient {
 					zones,
 					firewallMap,
 					timeRange,
+					httpStatusGroup,
 				);
 			case "adaptive-metrics":
 				return this.getAdaptiveMetrics(zoneIds, zones, timeRange);
@@ -1571,6 +1574,7 @@ export class CloudflareMetricsClient {
 	 * @param zones Zone metadata for label mapping.
 	 * @param firewallRules Map of rule IDs to names for labels.
 	 * @param timeRange Time range for the query.
+	 * @param httpStatusGroup Whether to group HTTP response statuses by class.
 	 * @returns HTTP metrics.
 	 * @throws {Error} When GraphQL query fails.
 	 */
@@ -1579,6 +1583,7 @@ export class CloudflareMetricsClient {
 		zones: Zone[],
 		firewallRules: Map<string, string>,
 		timeRange: TimeRange,
+		httpStatusGroup: boolean,
 	): Promise<MetricDefinition[]> {
 		const queryVars = {
 			zoneIDs: zoneIds,
@@ -1644,7 +1649,9 @@ export class CloudflareMetricsClient {
 		};
 		const requestsStatus: MetricDefinition = {
 			name: "cloudflare_zone_requests_status_total",
-			help: "Requests by status code group",
+			help: httpStatusGroup
+				? "Requests by status code group"
+				: "Requests by status code",
 			type: "counter",
 			values: [],
 		};
@@ -1860,12 +1867,14 @@ export class CloudflareMetricsClient {
 				}
 			}
 
-			// Status code breakdown (with grouping)
+			// Status code breakdown
 			const statusGroups: Record<string, number> = {};
 			for (const s of sum?.responseStatusMap ?? []) {
-				const groupedStatus = groupStatusCode(s.edgeResponseStatus ?? 0);
-				statusGroups[groupedStatus] =
-					(statusGroups[groupedStatus] ?? 0) + (s.requests ?? 0);
+				const statusCode = s.edgeResponseStatus ?? 0;
+				const status = httpStatusGroup
+					? groupStatusCode(statusCode)
+					: String(statusCode);
+				statusGroups[status] = (statusGroups[status] ?? 0) + (s.requests ?? 0);
 			}
 			for (const [status, count] of Object.entries(statusGroups)) {
 				requestsStatus.values.push({

@@ -62,6 +62,80 @@ describe("CloudflareMetricsClient", () => {
 	});
 
 	it.each([
+		{
+			httpStatusGroup: false,
+			expected: [
+				{ labels: { status: "200", zone: "example.com" }, value: 3 },
+				{ labels: { status: "204", zone: "example.com" }, value: 2 },
+			],
+		},
+		{
+			httpStatusGroup: true,
+			expected: [{ labels: { status: "2xx", zone: "example.com" }, value: 5 }],
+		},
+	])("respects HTTP status grouping when set to $httpStatusGroup", async ({
+		httpStatusGroup,
+		expected,
+	}) => {
+		const fetch: typeof globalThis.fetch = async () =>
+			new Response(
+				JSON.stringify({
+					data: {
+						viewer: {
+							zones: [
+								{
+									zoneTag: "zone-id",
+									httpRequests1mGroups: [
+										{
+											sum: {
+												requests: 5,
+												responseStatusMap: [
+													{ edgeResponseStatus: 200, requests: 3 },
+													{ edgeResponseStatus: 204, requests: 2 },
+												],
+											},
+										},
+									],
+									firewallEventsAdaptiveGroups: [],
+								},
+							],
+						},
+					},
+				}),
+				{ headers: { "content-type": "application/json" } },
+			);
+		const client = createClient(fetch);
+
+		const metrics = await client.getZoneMetrics(
+			"http-metrics",
+			["zone-id"],
+			[
+				{
+					id: "zone-id",
+					name: "example.com",
+					status: "active",
+					plan: { id: "paid", name: "Paid" },
+					account: { id: "account-id", name: "Account" },
+				},
+			],
+			{},
+			{
+				mintime: "2026-01-01T00:00:00.000Z",
+				maxtime: "2026-01-01T00:01:00.000Z",
+			},
+			undefined,
+			undefined,
+			httpStatusGroup,
+		);
+
+		expect(
+			metrics.find(
+				(metric) => metric.name === "cloudflare_zone_requests_status_total",
+			)?.values,
+		).toEqual(expected);
+	});
+
+	it.each([
 		"http-metrics",
 		"adaptive-metrics",
 		"edge-country-metrics",
