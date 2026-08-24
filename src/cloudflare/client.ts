@@ -732,12 +732,6 @@ export class CloudflareMetricsClient {
 			throw graphQLQueryError("magic-transit", result.error);
 		}
 
-		const activeTunnels: MetricDefinition = {
-			name: "cloudflare_magic_transit_active_tunnels",
-			help: "Active Magic Transit tunnels",
-			type: "gauge",
-			values: [],
-		};
 		const healthyTunnels: MetricDefinition = {
 			name: "cloudflare_magic_transit_healthy_tunnels",
 			help: "Healthy Magic Transit tunnels",
@@ -814,31 +808,25 @@ export class CloudflareMetricsClient {
 						site_name: siteName,
 					};
 
-					// Active: count where active=1 (uint8 boolean in CF schema)
-					const active = tunnelGroups
-						.filter((g) => (g.dimensions?.active ?? 0) === 1)
-						.reduce((sum, g) => sum + (g.count ?? 0), 0);
-					if (active > 0) activeTunnels.values.push({ labels, value: active });
-
-					// Healthy: resultStatus === "healthy"
+					// Healthy: resultStatus === "ok" (the API never returns "healthy")
 					const healthy = tunnelGroups
-						.filter((g) => g.dimensions?.resultStatus === "healthy")
+						.filter((g) => g.dimensions?.resultStatus === "ok")
 						.reduce((sum, g) => sum + (g.count ?? 0), 0);
 					if (healthy > 0)
 						healthyTunnels.values.push({ labels, value: healthy });
 
-					// Failures: resultStatus !== "healthy"
+					// Failures: everything that isn't "ok"
 					const failures = tunnelGroups
-						.filter((g) => g.dimensions?.resultStatus !== "healthy")
+						.filter((g) => g.dimensions?.resultStatus !== "ok")
 						.reduce((sum, g) => sum + (g.count ?? 0), 0);
 					if (failures > 0)
 						tunnelFailures.values.push({ labels, value: failures });
 
-					// Failures by status: group non-healthy results by resultStatus
+					// Failures by status: group non-"ok" results by resultStatus
 					const byStatus = new Map<string, number>();
 					for (const g of tunnelGroups) {
 						const status = g.dimensions?.resultStatus ?? "";
-						if (status === "healthy" || status === "") continue;
+						if (status === "ok" || status === "") continue;
 						byStatus.set(status, (byStatus.get(status) ?? 0) + (g.count ?? 0));
 					}
 					for (const [status, count] of byStatus) {
@@ -886,7 +874,6 @@ export class CloudflareMetricsClient {
 		}
 
 		return [
-			activeTunnels,
 			healthyTunnels,
 			tunnelFailures,
 			edgeColoCount,
