@@ -20,7 +20,6 @@ describe("CloudflareMetricsClient", () => {
 		"magic-transit-slo",
 		"magic-transit-traffic",
 		"magic-firewall-samples",
-		"network-analytics",
 		"stream-video-playback",
 		"stream-live-inputs",
 	] as const)("surfaces %s access denial instead of reporting an empty refresh", async (query) => {
@@ -44,6 +43,97 @@ describe("CloudflareMetricsClient", () => {
 				maxtime: "2026-01-01T00:01:00.000Z",
 			}),
 		).rejects.toMatchObject({ code: ErrorCode.GRAPHQL_FIELD_ACCESS });
+	});
+
+	// Network-analytics diverges from the other account queries: each NAv2
+	// dataset is queried independently so a per-dataset access denial does NOT
+	// throw away the datasets the account IS entitled to (this avoids GraphQL
+	// null-bubbling collapsing the whole combined response). A denied dataset is
+	// skipped and cached, never surfaced as a thrown error.
+	it("skips access-denied network-analytics datasets without throwing", async () => {
+		const fetch: typeof globalThis.fetch = async () =>
+			new Response(
+				JSON.stringify({
+					errors: [
+						{
+							message: "account does not have access to the path",
+							extensions: { code: "FORBIDDEN" },
+						},
+					],
+				}),
+				{ headers: { "content-type": "application/json" } },
+			);
+		const client = createClient(fetch);
+
+		await expect(
+			client.getAccountMetrics("network-analytics", "account-id", "Account", {
+				mintime: "2026-01-01T00:00:00.000Z",
+				maxtime: "2026-01-01T00:01:00.000Z",
+			}),
+		).resolves.toEqual([]);
+	});
+
+	it("returns entitled network-analytics datasets when others are denied", async () => {
+		const fetch: typeof globalThis.fetch = async (_input, init) => {
+			const body = String(init?.body ?? "");
+			// Only Magic Transit is entitled; every other dataset is denied.
+			if (body.includes("NetworkAnalyticsMagicTransit")) {
+				return new Response(
+					JSON.stringify({
+						data: {
+							viewer: {
+								accounts: [
+									{
+										magicTransitNetworkAnalyticsAdaptiveGroups: [
+											{
+												sum: { bits: 100, packets: 5 },
+												dimensions: {
+													outcome: "pass",
+													direction: "ingress",
+													ipProtocolName: "tcp",
+													mitigationSystem: "flowtrackd",
+												},
+											},
+										],
+									},
+								],
+							},
+						},
+					}),
+					{ headers: { "content-type": "application/json" } },
+				);
+			}
+			return new Response(
+				JSON.stringify({
+					errors: [
+						{
+							message: "account does not have access to the path",
+							extensions: { code: "FORBIDDEN" },
+						},
+					],
+				}),
+				{ headers: { "content-type": "application/json" } },
+			);
+		};
+		const client = createClient(fetch);
+
+		const metrics = await client.getAccountMetrics(
+			"network-analytics",
+			"account-id",
+			"Account",
+			{
+				mintime: "2026-01-01T00:00:00.000Z",
+				maxtime: "2026-01-01T00:01:00.000Z",
+			},
+		);
+
+		const names = metrics.map((m) => m.name);
+		expect(names).toContain(
+			"cloudflare_network_analytics_magic_transit_bits_total",
+		);
+		expect(names).toContain(
+			"cloudflare_network_analytics_magic_transit_packets_total",
+		);
 	});
 
 	it("allows a successful query with no observations", async () => {
