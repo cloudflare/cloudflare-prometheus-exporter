@@ -315,6 +315,7 @@ curl -X DELETE https://your-worker.workers.dev/config
 
 | Metric | Type | Labels |
 |--------|------|--------|
+| `cloudflare_magic_transit_active_tunnels` | gauge | account, tunnel_name, site_name |
 | `cloudflare_magic_transit_healthy_tunnels` | gauge | account, tunnel_name, site_name |
 | `cloudflare_magic_transit_tunnel_failures` | gauge | account, tunnel_name, site_name |
 | `cloudflare_magic_transit_edge_colo_count` | gauge | account, tunnel_name, site_name |
