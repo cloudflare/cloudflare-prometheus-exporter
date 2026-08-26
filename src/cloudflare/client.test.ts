@@ -61,6 +61,69 @@ describe("CloudflareMetricsClient", () => {
 		).resolves.toEqual([]);
 	});
 
+	it("reports active Magic Transit tunnel health checks", async () => {
+		const fetch: typeof globalThis.fetch = async () =>
+			new Response(
+				JSON.stringify({
+					data: {
+						viewer: {
+							accounts: [
+								{
+									magicTransitTunnelHealthChecksAdaptiveGroups: [
+										{
+											count: 3,
+											dimensions: {
+												active: 1,
+												resultStatus: "ok",
+												siteName: "site",
+												tunnelName: "tunnel",
+											},
+										},
+										{
+											count: 2,
+											dimensions: {
+												active: 0,
+												resultStatus: "timeout",
+												siteName: "site",
+												tunnelName: "tunnel",
+											},
+										},
+									],
+								},
+							],
+						},
+					},
+				}),
+				{ headers: { "content-type": "application/json" } },
+			);
+		const client = createClient(fetch);
+
+		const metrics = await client.getAccountMetrics(
+			"magic-transit",
+			"account-id",
+			"Account",
+			{
+				mintime: "2026-01-01T00:00:00.000Z",
+				maxtime: "2026-01-01T00:01:00.000Z",
+			},
+		);
+
+		expect(
+			metrics.find(
+				(metric) => metric.name === "cloudflare_magic_transit_active_tunnels",
+			)?.values,
+		).toEqual([
+			{
+				labels: {
+					account: "account",
+					site_name: "site",
+					tunnel_name: "tunnel",
+				},
+				value: 3,
+			},
+		]);
+	});
+
 	it.each([
 		{
 			httpStatusGroup: false,
