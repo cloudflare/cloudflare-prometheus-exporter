@@ -61,6 +61,60 @@ describe("CloudflareMetricsClient", () => {
 		).resolves.toEqual([]);
 	});
 
+	it("identifies SSL certificates by ID and sorted SANs", async () => {
+		const fetch: typeof globalThis.fetch = async () =>
+			new Response(
+				JSON.stringify({
+					success: true,
+					errors: [],
+					messages: [],
+					result: [
+						{
+							id: "pack-id",
+							type: "sni_custom",
+							status: "active",
+							primary_certificate: "certificate-id",
+							hosts: ["example.com", "*.example.com"],
+							certificates: [
+								{
+									id: "certificate-id",
+									issuer: "Test CA",
+									status: "active",
+									expires_on: "2027-01-01T00:00:00.000Z",
+									signature: "ECDSAWithSHA256",
+								},
+							],
+						},
+					],
+				}),
+				{ headers: { "content-type": "application/json" } },
+			);
+		const client = createClient(fetch);
+
+		const metrics = await client.getSSLCertificateMetricsForZone({
+			id: "zone-id",
+			name: "example.com",
+			status: "active",
+			plan: { id: "paid", name: "Paid" },
+			account: { id: "account-id", name: "Account" },
+		});
+
+		expect(metrics[0]?.values).toEqual([
+			{
+				labels: {
+					zone: "example.com",
+					certificate_id: "certificate-id",
+					hosts: "*.example.com,example.com",
+					signature_algorithm: "ECDSAWithSHA256",
+					type: "sni_custom",
+					issuer: "Test CA",
+					status: "active",
+				},
+				value: 1798761600,
+			},
+		]);
+	});
+
 	it.each([
 		{
 			httpStatusGroup: false,

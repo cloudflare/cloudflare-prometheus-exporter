@@ -449,7 +449,9 @@ All hostname metrics are **gauge snapshots** of the **last completed minute**, d
 
 | Metric | Type | Labels |
 |--------|------|--------|
-| `cloudflare_zone_certificate_validation_status` | gauge | zone, type, issuer, status |
+| `cloudflare_zone_certificate_validation_status` | gauge | zone, certificate_id, hosts, signature_algorithm, type, issuer, status |
+
+The certificate metric value is the expiry time as a Unix timestamp. The `hosts` label contains the certificate's sorted, comma-separated hostnames/SANs. The `signature_algorithm` label distinguishes RSA and ECDSA certificates while retaining the hash algorithm reported by Cloudflare.
 
 ### Exporter Info Metrics
 
