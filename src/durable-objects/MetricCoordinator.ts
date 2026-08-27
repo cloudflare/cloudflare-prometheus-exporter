@@ -4,7 +4,7 @@ import { extractErrorInfo } from "../lib/errors";
 import { filterAccountsByIds, parseCommaSeparated } from "../lib/filters";
 import { createLogger, type Logger } from "../lib/logger";
 import type { MetricDefinition } from "../lib/metrics";
-import { serializeToPrometheus } from "../lib/prometheus";
+import { serializeToPrometheus, textToStream } from "../lib/prometheus";
 import { getConfig, type ResolvedConfig } from "../lib/runtime-config";
 import type { Account } from "../lib/types";
 import { AccountMetricCoordinator } from "./AccountMetricCoordinator";
@@ -139,9 +139,13 @@ export class MetricCoordinator extends DurableObject<Env> {
 	/**
 	 * Collects metrics from all accounts and serializes to Prometheus format.
 	 *
-	 * @returns Prometheus-formatted metrics string.
+	 * Returns a byte stream rather than a string: the aggregated payload now
+	 * exceeds the 32 MiB Workers RPC return-value limit, and a streamed
+	 * ReadableStream is not subject to that cap.
+	 *
+	 * @returns Prometheus-formatted metrics as a UTF-8 byte stream.
 	 */
-	async export(): Promise<string> {
+	async export(): Promise<ReadableStream<Uint8Array>> {
 		const config = await getConfig(this.env);
 		const logger = this.createLogger(config);
 
@@ -150,7 +154,7 @@ export class MetricCoordinator extends DurableObject<Env> {
 
 		if (accounts.length === 0) {
 			logger.warn("No accounts found");
-			return "";
+			return textToStream("");
 		}
 
 		logger.info("Exporting metrics", { account_count: accounts.length });
@@ -224,10 +228,11 @@ export class MetricCoordinator extends DurableObject<Env> {
 		);
 
 		const metricsDenylist = parseCommaSeparated(config.metricsDenylist);
-		return serializeToPrometheus([...exporterMetrics, ...allMetrics], {
+		const text = serializeToPrometheus([...exporterMetrics, ...allMetrics], {
 			denylist: metricsDenylist,
 			excludeLabels: config.excludeHost ? new Set(["host"]) : undefined,
 		});
+		return textToStream(text);
 	}
 
 	/**

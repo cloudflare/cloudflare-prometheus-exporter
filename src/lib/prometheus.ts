@@ -81,6 +81,49 @@ export function serializeToPrometheus(
 }
 
 /**
+ * Streams a string as UTF-8 byte chunks split on newline boundaries.
+ *
+ * Workers RPC caps a single serialized return value at 32 MiB, which the full
+ * metrics payload now exceeds. A returned ReadableStream is exempt from that cap
+ * because it is streamed rather than buffered into the RPC message. Splitting on
+ * newline boundaries keeps every chunk valid UTF-8 (a newline never falls inside
+ * a multi-byte code point) and avoids holding a second full-size copy of the
+ * payload in memory.
+ *
+ * @param text Full text to stream.
+ * @param targetChunkChars Approximate chunk size in characters (default 1 MiB).
+ * @returns Byte stream of the input text.
+ */
+export function textToStream(
+	text: string,
+	targetChunkChars = 1024 * 1024,
+): ReadableStream<Uint8Array> {
+	const encoder = new TextEncoder();
+	const length = text.length;
+	let pos = 0;
+
+	return new ReadableStream<Uint8Array>({
+		pull(controller) {
+			if (pos >= length) {
+				controller.close();
+				return;
+			}
+
+			let end = Math.min(pos + targetChunkChars, length);
+			// Extend to the next newline so chunks never split a code point.
+			if (end < length) {
+				const nextNewline = text.indexOf("\n", end);
+				end = nextNewline === -1 ? length : nextNewline + 1;
+			}
+
+			const chunk = text.slice(pos, end);
+			pos = end;
+			controller.enqueue(encoder.encode(chunk));
+		},
+	});
+}
+
+/**
  * Aggregates metric values with identical labels.
  * Counters are summed; gauges take the maximum value.
  *

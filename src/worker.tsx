@@ -89,8 +89,9 @@ app.get(env.METRICS_PATH, async (c) => {
 		const coordinator = await MetricCoordinator.get(c.env);
 		const output = await coordinator.export();
 		logger.info("Metrics exported successfully");
-		return c.text(output, 200, {
-			"Content-Type": "text/plain; charset=utf-8",
+		return new Response(output, {
+			status: 200,
+			headers: { "Content-Type": "text/plain; charset=utf-8" },
 		});
 	} catch (error) {
 		const message = error instanceof Error ? error.message : String(error);
