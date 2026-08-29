@@ -748,6 +748,22 @@ export const HostnameHttpMetricsQuery = graphql(`
           }
         }
 
+        hostContentCache: httpRequestsAdaptiveGroups(
+          limit: $limit
+          filter: {
+            datetime_geq: $mintime
+            datetime_lt: $maxtime
+            clientRequestHTTPHost_in: $hosts
+          }
+        ) {
+          count
+          dimensions {
+            clientRequestHTTPHost
+            cacheStatus
+            edgeResponseContentTypeName
+          }
+        }
+
         hostLatency: httpRequestsAdaptiveGroups(
           limit: $limit
           filter: {
