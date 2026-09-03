@@ -34,6 +34,14 @@ import {
 
 const STATE_KEY = "state";
 const ALARM_RECOVERY_DELAY_MS = 60 * 1000;
+const COLO_METRICS_QUERY_NAME = "colo-metrics";
+const COLO_SHARD_SECONDS = 5;
+const COLO_SHARD_ROTATION_MINUTES = 3;
+
+const ColoTimestampShardSchema = z.object({
+	timestamp: z.string(),
+	metrics: z.array(MetricDefinitionSchema),
+});
 
 /**
  * Maximum allowed hostnames in HOST_METRICS_ALLOWLIST.
@@ -79,6 +87,47 @@ type MetricFetchResult = {
 	failedScopes: ReadonlySet<string>;
 	zoneRetryAfter: Record<string, number>;
 };
+
+function coloTimestampShardKey(
+	queryName: string,
+	accountId: string,
+	timestamp: Date,
+): string {
+	const minuteSlot = timestamp.getUTCMinutes() % COLO_SHARD_ROTATION_MINUTES;
+	const seconds =
+		Math.floor(timestamp.getUTCSeconds() / COLO_SHARD_SECONDS) *
+		COLO_SHARD_SECONDS;
+	return `${queryName}_${accountId}_${minuteSlot}_min_${seconds}`;
+}
+
+function fixedMinuteRange(config: ResolvedConfig): TimeRange {
+	return getTimeRange(config.scrapeDelaySeconds, 60);
+}
+
+function currentColoShardTimestamp(config: ResolvedConfig): Date {
+	const currentSeconds = Math.floor(
+		new Date().getUTCSeconds() / COLO_SHARD_SECONDS,
+	) * COLO_SHARD_SECONDS;
+	const minuteStart = new Date(fixedMinuteRange(config).mintime);
+	minuteStart.setUTCSeconds(currentSeconds, 0);
+	return minuteStart;
+}
+
+function coloTimestampShardRanges(timeRange: TimeRange): TimeRange[] {
+	const startMs = new Date(timeRange.mintime).getTime();
+	const endMs = new Date(timeRange.maxtime).getTime();
+	const bucketMs = COLO_SHARD_SECONDS * 1000;
+	const ranges: TimeRange[] = [];
+
+	for (let start = startMs; start < endMs; start += bucketMs) {
+		ranges.push({
+			mintime: new Date(start).toISOString(),
+			maxtime: new Date(Math.min(start + bucketMs, endMs)).toISOString(),
+		});
+	}
+
+	return ranges;
+}
 
 /**
  * Durable Object that fetches and exports Prometheus metrics for a specific query scope.
@@ -471,6 +520,167 @@ export class MetricExporter extends DurableObject<Env> {
 		await this.ctx.storage.setAlarm(nextAlarm);
 	}
 
+	/** Fetch and persist sharded colo metric timestamp buckets for one delayed minute. */
+	private async refreshShardedColoTimestampBuckets(
+		client: ReturnType<typeof getCloudflareMetricsClient>,
+		state: MetricExporterState,
+		config: ResolvedConfig,
+		logger: Logger,
+	): Promise<MetricFetchResult> {
+		const timeRange = fixedMinuteRange(config);
+		const partialErrors: unknown[] = [];
+		const failedScopes = new Set<string>();
+		const zoneRetryAfter: Record<string, number> = {};
+		let firstError: unknown;
+		let successfulBuckets = 0;
+
+		for (const bucketRange of coloTimestampShardRanges(timeRange)) {
+			const timestamp = new Date(bucketRange.mintime);
+			const key = coloTimestampShardKey(
+				state.queryName,
+				state.accountId,
+				timestamp,
+			);
+
+			try {
+				const result = await this.fetchShardedColoMetrics(
+					client,
+					state,
+					bucketRange,
+					config,
+					logger,
+				);
+				await saveChunkedValue(
+					chunkedDurableObjectStorage(this.ctx.storage),
+					key,
+					{ timestamp: bucketRange.mintime, metrics: result.metrics },
+				);
+				for (const error of result.partialErrors) partialErrors.push(error);
+				for (const scope of result.failedScopes) failedScopes.add(scope);
+				Object.assign(zoneRetryAfter, result.zoneRetryAfter);
+				successfulBuckets++;
+			} catch (error) {
+				firstError ??= error;
+				partialErrors.push(error);
+				logger.error("Sharded colo timestamp query failed", {
+					timestamp: bucketRange.mintime,
+					shard_end: bucketRange.maxtime,
+					error: error instanceof Error ? error.message : String(error),
+				});
+				try {
+					await saveChunkedValue(
+						chunkedDurableObjectStorage(this.ctx.storage),
+						key,
+						{ timestamp: bucketRange.mintime, metrics: [] },
+					);
+				} catch (storageError) {
+					logger.error("Failed to clear stale sharded colo timestamp", {
+						timestamp: bucketRange.mintime,
+						error:
+							storageError instanceof Error
+								? storageError.message
+								: String(storageError),
+					});
+				}
+			}
+		}
+
+		if (successfulBuckets === 0 && firstError !== undefined) {
+			throw firstError;
+		}
+
+		return {
+			metrics: [],
+			partialErrors,
+			failedScopes,
+			zoneRetryAfter,
+		};
+	}
+
+	private async fetchShardedColoMetrics(
+		client: ReturnType<typeof getCloudflareMetricsClient>,
+		state: MetricExporterState,
+		timeRange: TimeRange,
+		config: ResolvedConfig,
+		logger: Logger,
+	): Promise<MetricFetchResult> {
+		const { accountName, zones } = state;
+		let zonesToQuery = zones;
+		if (isPaidTierGraphQLQuery(state.queryName)) {
+			const { paid, free } = partitionZonesByTier(zones);
+			if (free.length > 0) {
+				logger.info("Skipping free tier zones for paid-tier query", {
+					skipped_zones: free.map((z) => z.name),
+					processing_zones: paid.length,
+				});
+			}
+			zonesToQuery = paid;
+		}
+
+		if (zonesToQuery.length === 0) {
+			return {
+				metrics: [],
+				partialErrors: [],
+				failedScopes: new Set(),
+				zoneRetryAfter: {},
+			};
+		}
+
+		const ZONES_PER_CHUNK = 10;
+		if (zonesToQuery.length <= ZONES_PER_CHUNK) {
+			const zoneIds = zonesToQuery.map((z) => z.id);
+			return {
+				metrics: await client.getShardedColoMetrics(
+					zoneIds,
+					zonesToQuery,
+					timeRange,
+				),
+				partialErrors: [],
+				failedScopes: new Set(),
+				zoneRetryAfter: {},
+			};
+		}
+
+		const chunkResults: MetricDefinition[][] = [];
+		const partialErrors: unknown[] = [];
+		const failedScopes = new Set<string>();
+		let firstChunkError: unknown;
+		for (let i = 0; i < zonesToQuery.length; i += ZONES_PER_CHUNK) {
+			const chunkZones = zonesToQuery.slice(i, i + ZONES_PER_CHUNK);
+			const chunkIds = chunkZones.map((z) => z.id);
+
+			try {
+				chunkResults.push(
+					await client.getShardedColoMetrics(chunkIds, chunkZones, timeRange),
+				);
+			} catch (error) {
+				firstChunkError ??= error;
+				partialErrors.push(error);
+				for (const zone of chunkZones) failedScopes.add(zone.name);
+				logger.error("Sharded colo zone chunk query failed", {
+					query: state.queryName,
+					account: accountName,
+					chunk_index: Math.floor(i / ZONES_PER_CHUNK),
+					chunk_size: chunkZones.length,
+					total_zones: zonesToQuery.length,
+					failed_zones: chunkZones.map((z) => z.name),
+					error: error instanceof Error ? error.message : String(error),
+				});
+			}
+		}
+
+		if (chunkResults.length === 0 && firstChunkError !== undefined) {
+			throw firstChunkError;
+		}
+
+		return {
+			metrics: mergeMetricDefinitions(...chunkResults),
+			partialErrors,
+			failedScopes,
+			zoneRetryAfter: {},
+		};
+	}
+
 	/**
 	 * Fetch account-scoped metrics from Cloudflare API.
 	 * Handles both account-level and zone-batched queries.
@@ -490,6 +700,14 @@ export class MetricExporter extends DurableObject<Env> {
 		logger: Logger,
 	): Promise<MetricFetchResult> {
 		const { queryName, accountId, accountName, zones, firewallRules } = state;
+		if (queryName === COLO_METRICS_QUERY_NAME && config.shardColoMetrics) {
+			return this.refreshShardedColoTimestampBuckets(
+				client,
+				state,
+				config,
+				logger,
+			);
+		}
 
 		// Account-level queries (worker-totals, logpush-account, magic-transit)
 		if (isAccountLevelQuery(queryName)) {
@@ -740,6 +958,40 @@ export class MetricExporter extends DurableObject<Env> {
 	 */
 	async export(): Promise<MetricDefinition[]> {
 		const state = this.getState();
+		if (state.scopeType === "account") {
+			return this.exportAccountScopedMetrics(state);
+		}
 		return state.metrics;
+	}
+
+	private async exportAccountScopedMetrics(
+		state: MetricExporterState,
+	): Promise<MetricDefinition[]> {
+		const config = await getConfig(this.env);
+		if (state.queryName === COLO_METRICS_QUERY_NAME && config.shardColoMetrics) {
+			return this.exportShardedColoTimestampBucket(state, config);
+		}
+		return state.metrics;
+	}
+
+	private async exportShardedColoTimestampBucket(
+		state: MetricExporterState,
+		config: ResolvedConfig,
+	): Promise<MetricDefinition[]> {
+		if (state.scopeType !== "account") return [];
+		const timestamp = currentColoShardTimestamp(config);
+		const key = coloTimestampShardKey(
+			state.queryName,
+			state.accountId,
+			timestamp,
+		);
+		const bucket = await loadChunkedValue(
+			chunkedDurableObjectStorage(this.ctx.storage),
+			key,
+			ColoTimestampShardSchema,
+		);
+		return bucket?.timestamp === timestamp.toISOString()
+			? bucket.metrics
+			: [];
 	}
 }

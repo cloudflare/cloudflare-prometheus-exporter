@@ -8,6 +8,8 @@ export type SerializeOptions = {
 	denylist?: ReadonlySet<string>;
 	/** Set of label keys to exclude from all metrics. */
 	excludeLabels?: ReadonlySet<string>;
+	/** Include HELP and TYPE headers. Disable when streaming repeated metric families in chunks. */
+	includeHeaders?: boolean;
 };
 
 /**
@@ -25,6 +27,7 @@ export function serializeToPrometheus(
 ): string {
 	const denylist = options?.denylist ?? new Set<string>();
 	const excludeLabels = options?.excludeLabels ?? new Set<string>();
+	const includeHeaders = options?.includeHeaders ?? true;
 
 	// Group metrics by name to consolidate HELP/TYPE headers
 	const grouped = new Map<string, MetricDefinition>();
@@ -59,10 +62,12 @@ export function serializeToPrometheus(
 	const lines: string[] = [];
 
 	for (const [name, metric] of grouped) {
-		// HELP line
-		lines.push(`# HELP ${name} ${escapeHelp(metric.help)}`);
-		// TYPE line
-		lines.push(`# TYPE ${name} ${metric.type}`);
+		if (includeHeaders) {
+			// HELP line
+			lines.push(`# HELP ${name} ${escapeHelp(metric.help)}`);
+			// TYPE line
+			lines.push(`# TYPE ${name} ${metric.type}`);
+		}
 
 		// Aggregate values by label signature to eliminate duplicates
 		const aggregated = aggregateByLabels(metric.values, metric.type);

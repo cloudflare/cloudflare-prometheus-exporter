@@ -23,7 +23,7 @@ export const LandingPageScript: FC<Props> = ({
 				'queryLimit', 'scrapeDelaySeconds', 'timeWindowSeconds', 'metricRefreshIntervalSeconds',
 				'accountListCacheTtlSeconds', 'zoneListCacheTtlSeconds', 'sslCertsCacheTtlSeconds',
 				'logLevel', 'logFormat', 'cfAccounts', 'cfZones', 'cfFreeTierAccounts', 'metricsDenylist',
-				'excludeHost', 'httpStatusGroup', 'hostMetricsAllowlist', 'hostMetricsDelaySeconds'
+				'excludeHost', 'httpStatusGroup', 'shardColoMetrics', 'hostMetricsAllowlist', 'hostMetricsDelaySeconds'
 			];
 
 			// Load config on page load
@@ -83,7 +83,7 @@ export const LandingPageScript: FC<Props> = ({
 				});
 
 				// Toggle switches
-				['excludeHost', 'httpStatusGroup'].forEach(key => {
+				['excludeHost', 'httpStatusGroup', 'shardColoMetrics'].forEach(key => {
 					const el = document.getElementById('cfg-' + key);
 					if (el) {
 						const isActive = localConfig[key] === true;
@@ -196,7 +196,7 @@ export const LandingPageScript: FC<Props> = ({
 				const el = document.getElementById('cfg-' + key);
 				if (!el) return;
 
-				if (['excludeHost', 'httpStatusGroup'].includes(key)) {
+				if (['excludeHost', 'httpStatusGroup', 'shardColoMetrics'].includes(key)) {
 					const isActive = localConfig[key] === true;
 					el.classList.toggle('active', isActive);
 					el.setAttribute('aria-checked', isActive.toString());

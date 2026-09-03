@@ -2271,6 +2271,73 @@ export class CloudflareMetricsClient {
 		);
 	}
 
+	async getShardedColoMetrics(
+		zoneIds: string[],
+		zones: Zone[],
+		timeRange: TimeRange,
+	): Promise<MetricDefinition[]> {
+		const result = await this.gql.query(ColoMetricsQuery, {
+			zoneIDs: zoneIds,
+			mintime: timeRange.mintime,
+			maxtime: timeRange.maxtime,
+			limit: this.config.queryLimit,
+		});
+
+		if (result.error) {
+			throw graphQLQueryError("colo-metrics", result.error);
+		}
+
+		const visits: MetricDefinition = {
+			name: "cloudflare_zone_colocation_visits_5s",
+			help: "Visits per colo in the 5-second bucket",
+			type: "gauge",
+			values: [],
+		};
+		const responseBytes: MetricDefinition = {
+			name: "cloudflare_zone_colocation_edge_response_bytes_5s",
+			help: "Edge response bytes per colo in the 5-second bucket",
+			type: "gauge",
+			values: [],
+		};
+		const requestsTotal: MetricDefinition = {
+			name: "cloudflare_zone_colocation_requests_5s",
+			help: "Requests per colo in the 5-second bucket",
+			type: "gauge",
+			values: [],
+		};
+
+		for (const zoneData of result.data?.viewer?.zones ?? []) {
+			const zoneName = findZoneName(zoneData.zoneTag, zones);
+
+			for (const group of zoneData.httpRequestsAdaptiveGroups ?? []) {
+				const dim = group.dimensions;
+				const labels = {
+					zone: zoneName,
+					colo: dim?.coloCode ?? "",
+					host: dim?.clientRequestHTTPHost ?? "",
+				};
+
+				const visitsValue = group.sum?.visits;
+				if (visitsValue != null && visitsValue > 0) {
+					visits.values.push({ labels, value: visitsValue });
+				}
+
+				const bytesValue = group.sum?.edgeResponseBytes;
+				if (bytesValue != null && bytesValue > 0) {
+					responseBytes.values.push({ labels, value: bytesValue });
+				}
+
+				if (group.count != null && group.count > 0) {
+					requestsTotal.values.push({ labels, value: group.count });
+				}
+			}
+		}
+
+		return [visits, responseBytes, requestsTotal].filter(
+			(m) => m.values.length > 0,
+		);
+	}
+
 	/**
 	 * Error visits, bytes, requests per colo (4xx+).
 	 *
