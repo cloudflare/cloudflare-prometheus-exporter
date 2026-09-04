@@ -1204,6 +1204,27 @@ export const LandingPage: FC<Props> = ({ config }) => {
 												/>
 											</div>
 										</div>
+										<div>
+											<label
+												for="cfg-shardColoMetrics"
+												class="block text-sm font-medium text-gray-700 mb-2"
+											>
+												Shard Colo Metrics
+											</label>
+											<div class="flex items-center justify-between">
+												<p class="text-xs text-gray-500">
+													Use 5-second bucketed colo metrics
+												</p>
+												<button
+													type="button"
+													id="cfg-shardColoMetrics"
+													class="toggle-switch"
+													onclick="toggleSwitch('shardColoMetrics')"
+													role="switch"
+													aria-checked="false"
+												/>
+											</div>
+										</div>
 									</div>
 								</div>
 							</div>

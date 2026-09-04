@@ -67,6 +67,7 @@
 		"HOST_METRICS_DELAY_SECONDS": 60,
 		"EXCLUDE_HOST": false,
 		"CF_HTTP_STATUS_GROUP": false,
+		"SHARD_COLO_METRICS": false,
 		"METRICS_PATH": "/metrics",
 		"DISABLE_UI": false,
 		"DISABLE_CONFIG_API": false
