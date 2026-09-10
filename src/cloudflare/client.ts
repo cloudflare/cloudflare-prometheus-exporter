@@ -2675,6 +2675,42 @@ export class CloudflareMetricsClient {
 			type: "gauge",
 			values: [],
 		};
+		const hostnameEdgeTtfbP99: MetricDefinition = {
+			name: "cloudflare_zone_hostname_edge_ttfb_p99_seconds",
+			help: "P99 edge time to first byte per hostname in seconds (last completed minute)",
+			type: "gauge",
+			values: [],
+		};
+		const hostnameOriginDurationP99: MetricDefinition = {
+			name: "cloudflare_zone_hostname_origin_response_duration_p99_seconds",
+			help: "P99 origin response duration per hostname in seconds (last completed minute)",
+			type: "gauge",
+			values: [],
+		};
+		const hostnameColoOriginDuration: MetricDefinition = {
+			name: "cloudflare_zone_hostname_colo_origin_response_duration_seconds",
+			help: "Average origin response duration per hostname and Cloudflare colo in seconds (last completed minute)",
+			type: "gauge",
+			values: [],
+		};
+		const hostnameColoOriginDurationP95: MetricDefinition = {
+			name: "cloudflare_zone_hostname_colo_origin_response_duration_p95_seconds",
+			help: "P95 origin response duration per hostname and Cloudflare colo in seconds (last completed minute)",
+			type: "gauge",
+			values: [],
+		};
+		const hostnameColoOriginDurationP99: MetricDefinition = {
+			name: "cloudflare_zone_hostname_colo_origin_response_duration_p99_seconds",
+			help: "P99 origin response duration per hostname and Cloudflare colo in seconds (last completed minute)",
+			type: "gauge",
+			values: [],
+		};
+		const hostnameColoRequests: MetricDefinition = {
+			name: "cloudflare_zone_hostname_colo_requests_total",
+			help: "Requests per hostname and Cloudflare colo (last completed minute)",
+			type: "counter",
+			values: [],
+		};
 
 		for (const zoneData of result.data?.viewer?.zones ?? []) {
 			const zoneName = findZoneName(zoneData.zoneTag, zones);
@@ -2782,6 +2818,62 @@ export class CloudflareMetricsClient {
 							value: q.originResponseDurationMsP95 / 1000,
 						});
 					}
+					if (q.edgeTimeToFirstByteMsP99 != null) {
+						hostnameEdgeTtfbP99.values.push({
+							labels: baseLabels,
+							value: q.edgeTimeToFirstByteMsP99 / 1000,
+						});
+					}
+					if (q.originResponseDurationMsP99 != null) {
+						hostnameOriginDurationP99.values.push({
+							labels: baseLabels,
+							value: q.originResponseDurationMsP99 / 1000,
+						});
+					}
+				}
+			}
+
+			// Latency per host AND Cloudflare colo. Isolates a degraded edge->origin
+			// network path, which host-level aggregates hide: one bad colo's tail is
+			// diluted by every healthy colo serving the same host.
+			for (const group of zoneData.hostColoLatency ?? []) {
+				const host = (
+					group.dimensions?.clientRequestHTTPHost ?? ""
+				).toLowerCase();
+				const coloCode = group.dimensions?.coloCode ?? "";
+				if (coloCode === "") continue;
+				const baseLabels = { zone: zoneName, host, colo_code: coloCode };
+
+				const count = group.count ?? 0;
+				if (count > 0) {
+					hostnameColoRequests.values.push({
+						labels: baseLabels,
+						value: count,
+					});
+				}
+
+				const avgDuration = group.avg?.originResponseDurationMs;
+				if (avgDuration != null) {
+					hostnameColoOriginDuration.values.push({
+						labels: baseLabels,
+						value: avgDuration / 1000,
+					});
+				}
+
+				const cq = group.quantiles;
+				if (cq) {
+					if (cq.originResponseDurationMsP95 != null) {
+						hostnameColoOriginDurationP95.values.push({
+							labels: baseLabels,
+							value: cq.originResponseDurationMsP95 / 1000,
+						});
+					}
+					if (cq.originResponseDurationMsP99 != null) {
+						hostnameColoOriginDurationP99.values.push({
+							labels: baseLabels,
+							value: cq.originResponseDurationMsP99 / 1000,
+						});
+					}
 				}
 			}
 
@@ -2792,6 +2884,10 @@ export class CloudflareMetricsClient {
 				{ name: "hostStatus", len: zoneData.hostStatus?.length ?? 0 },
 				{ name: "hostCache", len: zoneData.hostCache?.length ?? 0 },
 				{ name: "hostLatency", len: zoneData.hostLatency?.length ?? 0 },
+				{
+					name: "hostColoLatency",
+					len: zoneData.hostColoLatency?.length ?? 0,
+				},
 			];
 			for (const alias of aliases) {
 				if (alias.len >= limit) {
@@ -2832,6 +2928,12 @@ export class CloudflareMetricsClient {
 			hostnameOriginDuration,
 			hostnameOriginDurationP50,
 			hostnameOriginDurationP95,
+			hostnameEdgeTtfbP99,
+			hostnameOriginDurationP99,
+			hostnameColoOriginDuration,
+			hostnameColoOriginDurationP95,
+			hostnameColoOriginDurationP99,
+			hostnameColoRequests,
 		].filter((m) => m.values.length > 0);
 	}
 

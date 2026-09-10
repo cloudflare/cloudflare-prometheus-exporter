@@ -798,8 +798,32 @@ export const HostnameHttpMetricsQuery = graphql(`
           quantiles {
             edgeTimeToFirstByteMsP50
             edgeTimeToFirstByteMsP95
+            edgeTimeToFirstByteMsP99
             originResponseDurationMsP50
             originResponseDurationMsP95
+            originResponseDurationMsP99
+          }
+        }
+
+        hostColoLatency: httpRequestsAdaptiveGroups(
+          limit: $limit
+          filter: {
+            datetime_geq: $mintime
+            datetime_lt: $maxtime
+            clientRequestHTTPHost_in: $hosts
+          }
+        ) {
+          count
+          dimensions {
+            clientRequestHTTPHost
+            coloCode
+          }
+          avg {
+            originResponseDurationMs
+          }
+          quantiles {
+            originResponseDurationMsP95
+            originResponseDurationMsP99
           }
         }
       }
