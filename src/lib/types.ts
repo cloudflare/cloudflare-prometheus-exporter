@@ -134,6 +134,7 @@ export const SSLCertificateSchema = z
 		status: z.string(),
 		issuer: z.string(),
 		expiresOn: z.string(),
+		signatureAlgorithm: z.string(),
 		hosts: z.array(z.string()),
 	})
 	.readonly();
