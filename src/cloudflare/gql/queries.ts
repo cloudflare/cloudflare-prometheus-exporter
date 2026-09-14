@@ -572,6 +572,7 @@ export const MagicTransitMetricsQuery = graphql(`
             tunnelState
           }
           dimensions {
+            active
             datetime
             edgeColoCity
             edgeColoCountry

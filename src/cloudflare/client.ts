@@ -733,6 +733,12 @@ export class CloudflareMetricsClient {
 			throw graphQLQueryError("magic-transit", result.error);
 		}
 
+		const activeTunnels: MetricDefinition = {
+			name: "cloudflare_magic_transit_active_tunnels",
+			help: "Active Magic Transit tunnels",
+			type: "gauge",
+			values: [],
+		};
 		const healthyTunnels: MetricDefinition = {
 			name: "cloudflare_magic_transit_healthy_tunnels",
 			help: "Healthy Magic Transit tunnels",
@@ -809,6 +815,11 @@ export class CloudflareMetricsClient {
 						site_name: siteName,
 					};
 
+					const active = tunnelGroups
+						.filter((g) => (g.dimensions?.active ?? 0) === 1)
+						.reduce((sum, g) => sum + (g.count ?? 0), 0);
+					if (active > 0) activeTunnels.values.push({ labels, value: active });
+
 					// Healthy: resultStatus === "ok" (the API never returns "healthy")
 					const healthy = tunnelGroups
 						.filter((g) => g.dimensions?.resultStatus === "ok")
@@ -875,6 +886,7 @@ export class CloudflareMetricsClient {
 		}
 
 		return [
+			activeTunnels,
 			healthyTunnels,
 			tunnelFailures,
 			edgeColoCount,
