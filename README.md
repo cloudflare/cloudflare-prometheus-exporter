@@ -458,8 +458,34 @@ All hostname metrics are **gauge snapshots** of the **last completed minute**, d
 |--------|------|--------|-------------|
 | `cloudflare_zone_hostname_edge_ttfb_p50_seconds` | gauge | zone, host | P50 edge TTFB in seconds |
 | `cloudflare_zone_hostname_edge_ttfb_p95_seconds` | gauge | zone, host | P95 edge TTFB in seconds |
+| `cloudflare_zone_hostname_edge_ttfb_p99_seconds` | gauge | zone, host | P99 edge TTFB in seconds |
 | `cloudflare_zone_hostname_origin_response_duration_p50_seconds` | gauge | zone, host | P50 origin response duration in seconds |
 | `cloudflare_zone_hostname_origin_response_duration_p95_seconds` | gauge | zone, host | P95 origin response duration in seconds |
+| `cloudflare_zone_hostname_origin_response_duration_p99_seconds` | gauge | zone, host | P99 origin response duration in seconds |
+
+**Latency by Cloudflare colo:**
+
+Origin latency broken down by the Cloudflare datacenter that served the request. Host-level
+aggregates hide a degraded edge-to-origin network path, because one bad colo's tail latency is
+diluted by every healthy colo serving the same host. These series make that visible.
+
+| Metric | Type | Labels | Description |
+|--------|------|--------|-------------|
+| `cloudflare_zone_hostname_colo_requests_total` | counter | zone, host, colo_code | Requests per hostname and colo |
+| `cloudflare_zone_hostname_colo_origin_response_duration_seconds` | gauge | zone, host, colo_code | Average origin response duration in seconds |
+| `cloudflare_zone_hostname_colo_origin_response_duration_p95_seconds` | gauge | zone, host, colo_code | P95 origin response duration in seconds |
+| `cloudflare_zone_hostname_colo_origin_response_duration_p99_seconds` | gauge | zone, host, colo_code | P99 origin response duration in seconds |
+
+Cardinality is bounded by the same `HOST_METRICS_ALLOWLIST` guardrail as the other hostname
+metrics (max 50 hosts), multiplied by the colos actually serving those hosts.
+
+Example — alert when one colo's path to origin degrades while others stay healthy:
+
+```promql
+cloudflare_zone_hostname_colo_origin_response_duration_p99_seconds{host="api.example.com"}
+  > 5 * ignoring(colo_code) group_left
+    quantile(0.5, cloudflare_zone_hostname_colo_origin_response_duration_p99_seconds{host="api.example.com"})
+```
 
 ### SSL Certificate Metrics
 
