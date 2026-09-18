@@ -1,5 +1,7 @@
 import type { MetricDefinition } from "./metrics";
 
+const CHUNK_TARGET_CHARS = 16 * 1024;
+
 /**
  * Options for Prometheus serialization.
  */
@@ -9,6 +11,34 @@ export type SerializeOptions = {
 	/** Set of label keys to exclude from all metrics. */
 	excludeLabels?: ReadonlySet<string>;
 };
+
+/** Adapts Prometheus chunks to a backpressure-aware byte stream. */
+export function createPrometheusStream(
+	chunks: AsyncGenerator<string | Uint8Array, void, void>,
+): ReadableStream<Uint8Array> {
+	const encoder = new TextEncoder();
+	return new ReadableStream({
+		type: "bytes",
+		async pull(controller) {
+			try {
+				const next = await chunks.next();
+				if (next.done) controller.close();
+				else {
+					controller.enqueue(
+						typeof next.value === "string"
+							? encoder.encode(next.value)
+							: next.value,
+					);
+				}
+			} catch (error) {
+				controller.error(error);
+			}
+		},
+		async cancel() {
+			await chunks.return();
+		},
+	});
+}
 
 /**
  * Serializes MetricDefinition array to Prometheus text exposition format.
@@ -23,6 +53,14 @@ export function serializeToPrometheus(
 	metrics: readonly MetricDefinition[],
 	options?: SerializeOptions,
 ): string {
+	return [...serializeToPrometheusChunks(metrics, options)].join("");
+}
+
+/** Lazily serializes legacy metrics into bounded, line-aligned chunks. */
+export function* serializeToPrometheusChunks(
+	metrics: readonly MetricDefinition[],
+	options?: SerializeOptions,
+): Generator<string> {
 	const denylist = options?.denylist ?? new Set<string>();
 	const excludeLabels = options?.excludeLabels ?? new Set<string>();
 
@@ -56,13 +94,21 @@ export function serializeToPrometheus(
 		}
 	}
 
-	const lines: string[] = [];
+	let buffer = "";
+	const append = function* (line: string) {
+		buffer += `${line}\n`;
+		if (buffer.length >= CHUNK_TARGET_CHARS) {
+			yield buffer;
+			buffer = "";
+		}
+	};
 
-	for (const [name, metric] of grouped) {
+	const families = [...grouped];
+	for (const [familyIndex, [name, metric]] of families.entries()) {
 		// HELP line
-		lines.push(`# HELP ${name} ${escapeHelp(metric.help)}`);
+		yield* append(`# HELP ${name} ${escapeHelp(metric.help)}`);
 		// TYPE line
-		lines.push(`# TYPE ${name} ${metric.type}`);
+		yield* append(`# TYPE ${name} ${metric.type}`);
 
 		// Aggregate values by label signature to eliminate duplicates
 		const aggregated = aggregateByLabels(metric.values, metric.type);
@@ -70,14 +116,12 @@ export function serializeToPrometheus(
 		// Value lines
 		for (const { labels, value } of aggregated) {
 			const labelStr = formatLabels(labels);
-			lines.push(`${name}${labelStr} ${formatValue(value)}`);
+			yield* append(`${name}${labelStr} ${formatValue(value)}`);
 		}
 
-		// Blank line between metrics for readability
-		lines.push("");
+		if (familyIndex < families.length - 1) yield* append("");
 	}
-
-	return lines.join("\n");
+	if (buffer.length > 0) yield buffer;
 }
 
 /**
