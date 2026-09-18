@@ -41,6 +41,9 @@ import {
 	MagicTransitTunnelTrafficQuery,
 	NetworkAnalyticsQuery,
 	OriginStatusMetricsQuery,
+	R2OperationsErrorsQuery,
+	R2OperationsMetricsQuery,
+	R2StorageMetricsQuery,
 	RequestMethodMetricsQuery,
 	StreamLiveInputsQuery,
 	StreamVideoPlaybackQuery,
@@ -129,6 +132,25 @@ const WORKER_METRICS = {
 	CPU_TIME: "cloudflare_worker_cpu_time_seconds",
 	DURATION: "cloudflare_worker_duration_seconds",
 } as const;
+
+// R2 metric names
+const R2_METRICS = {
+	OPERATIONS_REQUESTS: "cloudflare_r2_operations_requests_total",
+	OPERATIONS_RESPONSE_BYTES: "cloudflare_r2_operations_response_bytes_total",
+	OPERATIONS_RESPONSE_OBJECT_SIZE_BYTES:
+		"cloudflare_r2_operations_response_object_size_bytes_total",
+	OPERATIONS_ERRORS: "cloudflare_r2_operations_errors_total",
+	STORAGE_OBJECT_COUNT: "cloudflare_r2_storage_object_count",
+	STORAGE_PAYLOAD_BYTES: "cloudflare_r2_storage_payload_bytes",
+	STORAGE_METADATA_BYTES: "cloudflare_r2_storage_metadata_bytes",
+	STORAGE_UPLOAD_COUNT: "cloudflare_r2_storage_upload_count",
+} as const;
+
+// R2 storage is a daily snapshot dataset (not a per-minute counter series),
+// so its lookback is independent of the scrape's mintime/maxtime window.
+// Query a multi-day window so a missed or delayed daily snapshot doesn't
+// cause a bucket to disappear from the export entirely.
+const R2_STORAGE_LOOKBACK_MS = 3 * 24 * 60 * 60 * 1000;
 // ### API Call Summary
 //
 // Most zone-level request/bandwidth/threat metrics come from **a single GraphQL call** (`HTTPMetricsQuery`). Premium metrics require separate calls.
@@ -545,6 +567,18 @@ export class CloudflareMetricsClient {
 				);
 			case "images":
 				return this.getImagesMetrics(accountId, normalizedAccount);
+			case "r2-operations":
+				return this.getR2OperationsMetrics(
+					accountId,
+					normalizedAccount,
+					timeRange,
+				);
+			case "r2-storage":
+				return this.getR2StorageMetrics(
+					accountId,
+					normalizedAccount,
+					timeRange,
+				);
 			default: {
 				const _exhaustive: never = query;
 				throw new Error(`Unknown account metric query: ${_exhaustive}`);
@@ -1474,6 +1508,224 @@ export class CloudflareMetricsClient {
 		}
 
 		return [countCurrent, countAllowed].filter((m) => m.values.length > 0);
+	}
+
+	/**
+	 * Fetches R2 operations metrics (requests, response bytes, response
+	 * object size by operation/bucket/storage class) plus a separate error
+	 * breakdown by HTTP status code.
+	 *
+	 * @param accountId Cloudflare account ID.
+	 * @param normalizedAccount Normalized account name for labels.
+	 * @param timeRange Query time range.
+	 * @returns R2 operations metrics.
+	 */
+	private async getR2OperationsMetrics(
+		accountId: string,
+		normalizedAccount: string,
+		timeRange: { mintime: string; maxtime: string },
+	): Promise<MetricDefinition[]> {
+		const [result, errorsResult] = await Promise.all([
+			this.gql.query(R2OperationsMetricsQuery, {
+				accountID: accountId,
+				mintime: timeRange.mintime,
+				maxtime: timeRange.maxtime,
+				limit: this.config.queryLimit,
+			}),
+			this.gql.query(R2OperationsErrorsQuery, {
+				accountID: accountId,
+				mintime: timeRange.mintime,
+				maxtime: timeRange.maxtime,
+				limit: this.config.queryLimit,
+			}),
+		]);
+
+		if (result.error) {
+			throw graphQLQueryError("r2-operations", result.error);
+		}
+		if (errorsResult.error) {
+			throw graphQLQueryError("r2-operations", errorsResult.error);
+		}
+
+		const requestsMetric: MetricDefinition = {
+			name: R2_METRICS.OPERATIONS_REQUESTS,
+			help: "Total number of R2 operations",
+			type: "counter",
+			values: [],
+		};
+		const responseBytesMetric: MetricDefinition = {
+			name: R2_METRICS.OPERATIONS_RESPONSE_BYTES,
+			help: "Total number of bytes returned by R2 operations",
+			type: "counter",
+			values: [],
+		};
+		const responseObjectSizeMetric: MetricDefinition = {
+			name: R2_METRICS.OPERATIONS_RESPONSE_OBJECT_SIZE_BYTES,
+			help: "Total size in bytes of objects returned by R2 operations",
+			type: "counter",
+			values: [],
+		};
+		const errorsMetric: MetricDefinition = {
+			name: R2_METRICS.OPERATIONS_ERRORS,
+			help: "Total number of R2 operations that returned an error status code",
+			type: "counter",
+			values: [],
+		};
+
+		for (const accountData of result.data?.viewer?.accounts ?? []) {
+			for (const group of accountData.r2OperationsAdaptiveGroups ?? []) {
+				const dimensions = group.dimensions;
+				if (!dimensions) continue;
+				const labels = {
+					account: normalizedAccount,
+					bucket: dimensions.bucketName,
+					operation: dimensions.actionType,
+					status: dimensions.actionStatus,
+					storage_class: dimensions.storageClass,
+				};
+				requestsMetric.values.push({
+					labels,
+					value: group.sum?.requests ?? 0,
+				});
+				responseBytesMetric.values.push({
+					labels,
+					value: group.sum?.responseBytes ?? 0,
+				});
+				responseObjectSizeMetric.values.push({
+					labels,
+					value: group.sum?.responseObjectSize ?? 0,
+				});
+			}
+		}
+
+		for (const accountData of errorsResult.data?.viewer?.accounts ?? []) {
+			for (const group of accountData.r2OperationsAdaptiveGroups ?? []) {
+				const dimensions = group.dimensions;
+				if (!dimensions) continue;
+				errorsMetric.values.push({
+					labels: {
+						account: normalizedAccount,
+						bucket: dimensions.bucketName,
+						operation: dimensions.actionType,
+						response_status_code: String(dimensions.responseStatusCode),
+					},
+					value: group.sum?.requests ?? 0,
+				});
+			}
+		}
+
+		return [
+			requestsMetric,
+			responseBytesMetric,
+			responseObjectSizeMetric,
+			errorsMetric,
+		].filter((m) => m.values.length > 0);
+	}
+
+	/**
+	 * Fetches R2 storage metrics (object count, payload/metadata size, upload
+	 * count by bucket/storage class).
+	 *
+	 * R2 storage is reported as a daily snapshot rather than a per-minute
+	 * counter series, and can lag by up to ~48h. Rather than using the
+	 * scrape's mintime/maxtime window, this queries a wider lookback anchored
+	 * on maxtime and keeps only the most recent row per bucket/storage class.
+	 *
+	 * @param accountId Cloudflare account ID.
+	 * @param normalizedAccount Normalized account name for labels.
+	 * @param timeRange Query time range (only maxtime is used, as the anchor
+	 *   for the lookback window).
+	 * @returns R2 storage metrics.
+	 */
+	private async getR2StorageMetrics(
+		accountId: string,
+		normalizedAccount: string,
+		timeRange: { mintime: string; maxtime: string },
+	): Promise<MetricDefinition[]> {
+		const maxtime = timeRange.maxtime;
+		const mintime = new Date(
+			new Date(maxtime).getTime() - R2_STORAGE_LOOKBACK_MS,
+		).toISOString();
+
+		const result = await this.gql.query(R2StorageMetricsQuery, {
+			accountID: accountId,
+			mintime,
+			maxtime,
+			limit: this.config.queryLimit,
+		});
+
+		if (result.error) {
+			throw graphQLQueryError("r2-storage", result.error);
+		}
+
+		const objectCountMetric: MetricDefinition = {
+			name: R2_METRICS.STORAGE_OBJECT_COUNT,
+			help: "Current number of objects stored in the R2 bucket",
+			type: "gauge",
+			values: [],
+		};
+		const payloadBytesMetric: MetricDefinition = {
+			name: R2_METRICS.STORAGE_PAYLOAD_BYTES,
+			help: "Current payload size in bytes stored in the R2 bucket",
+			type: "gauge",
+			values: [],
+		};
+		const metadataBytesMetric: MetricDefinition = {
+			name: R2_METRICS.STORAGE_METADATA_BYTES,
+			help: "Current metadata size in bytes stored in the R2 bucket",
+			type: "gauge",
+			values: [],
+		};
+		const uploadCountMetric: MetricDefinition = {
+			name: R2_METRICS.STORAGE_UPLOAD_COUNT,
+			help: "Number of uploads to the R2 bucket on the most recent snapshot day",
+			type: "gauge",
+			values: [],
+		};
+
+		// GraphQL has no "latest row per group" support, so the query returns
+		// one row per bucket/storage-class/day and we keep only the newest
+		// (rows are ordered datetime_DESC, so the first occurrence wins).
+		const seenBuckets = new Set<string>();
+
+		for (const accountData of result.data?.viewer?.accounts ?? []) {
+			for (const group of accountData.r2StorageAdaptiveGroups ?? []) {
+				const dimensions = group.dimensions;
+				if (!dimensions) continue;
+				const bucketKey = `${dimensions.bucketName}::${dimensions.storageClass}`;
+				if (seenBuckets.has(bucketKey)) continue;
+				seenBuckets.add(bucketKey);
+
+				const labels = {
+					account: normalizedAccount,
+					bucket: dimensions.bucketName,
+					storage_class: dimensions.storageClass,
+				};
+				objectCountMetric.values.push({
+					labels,
+					value: group.max?.objectCount ?? 0,
+				});
+				payloadBytesMetric.values.push({
+					labels,
+					value: group.max?.payloadSize ?? 0,
+				});
+				metadataBytesMetric.values.push({
+					labels,
+					value: group.max?.metadataSize ?? 0,
+				});
+				uploadCountMetric.values.push({
+					labels,
+					value: group.max?.uploadCount ?? 0,
+				});
+			}
+		}
+
+		return [
+			objectCountMetric,
+			payloadBytesMetric,
+			metadataBytesMetric,
+			uploadCountMetric,
+		].filter((m) => m.values.length > 0);
 	}
 
 	/**

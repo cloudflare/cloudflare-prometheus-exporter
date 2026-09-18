@@ -977,6 +977,116 @@ export const StreamVideoPlaybackQuery = graphql(`
 `);
 
 /**
+ * R2 operations metrics (requests/bytes by operation, bucket, storage class).
+ * objectName is intentionally omitted (unbounded cardinality).
+ * responseStatusCode is queried separately (see R2OperationsErrorsQuery) to
+ * avoid multiplying series by status code on every successful request.
+ */
+export const R2OperationsMetricsQuery = graphql(`
+  query R2OperationsMetrics(
+    $accountID: string!
+    $limit: uint64!
+    $mintime: Time!
+    $maxtime: Time!
+  ) {
+    viewer {
+      accounts(filter: { accountTag: $accountID }) {
+        r2OperationsAdaptiveGroups(
+          limit: $limit
+          filter: { datetime_geq: $mintime, datetime_lt: $maxtime }
+        ) {
+          dimensions {
+            actionType
+            actionStatus
+            bucketName
+            storageClass
+          }
+          sum {
+            requests
+            responseBytes
+            responseObjectSize
+          }
+        }
+      }
+    }
+  }
+`);
+
+/**
+ * R2 operation errors by HTTP response status code.
+ * Kept separate from R2OperationsMetricsQuery so status codes (unbounded in
+ * principle) only appear on the error path, mirroring colo-error-metrics.
+ */
+export const R2OperationsErrorsQuery = graphql(`
+  query R2OperationsErrors(
+    $accountID: string!
+    $limit: uint64!
+    $mintime: Time!
+    $maxtime: Time!
+  ) {
+    viewer {
+      accounts(filter: { accountTag: $accountID }) {
+        r2OperationsAdaptiveGroups(
+          limit: $limit
+          filter: {
+            datetime_geq: $mintime
+            datetime_lt: $maxtime
+            responseStatusCode_geq: 400
+          }
+        ) {
+          dimensions {
+            actionType
+            bucketName
+            responseStatusCode
+          }
+          sum {
+            requests
+          }
+        }
+      }
+    }
+  }
+`);
+
+/**
+ * R2 storage metrics (object count, payload/metadata size, upload count).
+ * This dataset is a daily snapshot, not a per-minute counter series, so the
+ * handler queries a wider lookback window and keeps only the most recent
+ * row per bucket/storage class rather than using the standard mintime/maxtime
+ * scrape window.
+ */
+export const R2StorageMetricsQuery = graphql(`
+  query R2StorageMetrics(
+    $accountID: string!
+    $limit: uint64!
+    $mintime: Time!
+    $maxtime: Time!
+  ) {
+    viewer {
+      accounts(filter: { accountTag: $accountID }) {
+        r2StorageAdaptiveGroups(
+          limit: $limit
+          filter: { datetime_geq: $mintime, datetime_lt: $maxtime }
+          orderBy: [datetime_DESC]
+        ) {
+          dimensions {
+            bucketName
+            storageClass
+            datetime
+          }
+          max {
+            objectCount
+            payloadSize
+            metadataSize
+            uploadCount
+          }
+        }
+      }
+    }
+  }
+`);
+
+/**
  * Cloudflare Stream live input (input stream) metrics.
  * Groups segment counts and bit rate by event code.
  * inputId is intentionally omitted (high cardinality).
