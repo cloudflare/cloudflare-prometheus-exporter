@@ -449,6 +449,7 @@ export const LoadBalancerMetricsQuery = graphql(`
     $mintime: Time!
     $maxtime: Time!
     $limit: uint64!
+    $packed: Boolean!
   ) {
     viewer {
       zones(filter: { zoneTag_in: $zoneIDs }) {
@@ -456,7 +457,7 @@ export const LoadBalancerMetricsQuery = graphql(`
         loadBalancingRequestsAdaptiveGroups(
           filter: { datetime_geq: $mintime, datetime_lt: $maxtime }
           limit: $limit
-        ) {
+        ) @skip(if: $packed) {
           count
           dimensions {
             lbName
@@ -468,6 +469,49 @@ export const LoadBalancerMetricsQuery = graphql(`
             selectedPoolHealthy
             steeringPolicy
             numberOriginsSelected
+          }
+        }
+        poolRequests: loadBalancingRequestsAdaptiveGroups(
+          filter: { datetime_geq: $mintime, datetime_lt: $maxtime }
+          limit: $limit
+        ) @include(if: $packed) {
+          count
+          dimensions {
+            lbName
+            selectedPoolName
+            selectedOriginName
+          }
+        }
+        poolRtt: loadBalancingRequestsAdaptiveGroups(
+          filter: { datetime_geq: $mintime, datetime_lt: $maxtime }
+          limit: $limit
+        ) @include(if: $packed) {
+          count
+          dimensions {
+            lbName
+            selectedPoolName
+            selectedPoolAvgRttMs
+          }
+        }
+        originsSelected: loadBalancingRequestsAdaptiveGroups(
+          filter: { datetime_geq: $mintime, datetime_lt: $maxtime }
+          limit: $limit
+        ) @include(if: $packed) {
+          count
+          dimensions {
+            lbName
+            selectedPoolName
+            numberOriginsSelected
+          }
+        }
+        steeringPolicies: loadBalancingRequestsAdaptiveGroups(
+          filter: { datetime_geq: $mintime, datetime_lt: $maxtime }
+          limit: $limit
+        ) @include(if: $packed) {
+          count
+          dimensions {
+            lbName
+            steeringPolicy
           }
         }
         loadBalancingRequestsAdaptive(

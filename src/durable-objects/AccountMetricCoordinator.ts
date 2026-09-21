@@ -4,18 +4,21 @@ import {
 	getCloudflareMetricsClient,
 	ZONE_LEVEL_QUERIES,
 } from "../cloudflare/client";
-import { FREE_TIER_QUERIES } from "../cloudflare/queries";
+import { FREE_TIER_QUERIES, type MetricQueryName } from "../cloudflare/queries";
 import {
 	filterZonesByIds,
 	isFreeTierZone,
 	parseCommaSeparated,
 } from "../lib/filters";
 import { createLogger, type Logger } from "../lib/logger";
-import type { MetricDefinition } from "../lib/metrics";
-import type { PackedColoMetricState } from "../lib/packed-colo-state";
+import {
+	isPackedMetricQuery,
+	type PackedMetricQuery,
+} from "../lib/packed-metric-state";
+import { createPrometheusStream } from "../lib/prometheus";
 import { getConfig, type ResolvedConfig } from "../lib/runtime-config";
 import { getTimeRange } from "../lib/time";
-import type { Zone } from "../lib/types";
+import type { MetricExporterIdString, Zone } from "../lib/types";
 import { MetricExporter } from "./MetricExporter";
 
 const STATE_KEY = "state";
@@ -36,7 +39,7 @@ const ACCOUNT_SCOPED_QUERIES = [
 function getActiveAccountQueries(
 	config: ResolvedConfig,
 	isFreeTierAccount: boolean,
-): readonly string[] {
+): readonly MetricQueryName[] {
 	const hostnameEnabled =
 		parseCommaSeparated(config.hostMetricsAllowlist).size > 0 &&
 		!config.excludeHost;
@@ -66,6 +69,17 @@ type AccountMetricCoordinatorState = {
 	firewallRules: Record<string, string>;
 	lastZoneFetch: number;
 	lastRefresh: number;
+};
+
+type PrometheusExportDescriptor = {
+	exporterId: MetricExporterIdString;
+	mode: "legacy" | "packed";
+	query: MetricQueryName;
+	zone?: string;
+};
+
+type ResolvedPrometheusExport = PrometheusExportDescriptor & {
+	exporter: Awaited<ReturnType<typeof MetricExporter.get>>;
 };
 
 /**
@@ -324,21 +338,10 @@ export class AccountMetricCoordinator extends DurableObject<Env> {
 		});
 	}
 
-	/**
-	 * Returns normal MetricDefinition[] data plus packed colo data separately.
-	 * The caller decides the colo storage mode for the whole scrape; with packed
-	 * storage, colo-metrics are read only from packed state.
-	 */
-	async exportForPrometheus(options: { packedColoStorage: boolean }): Promise<{
-		metrics: MetricDefinition[];
-		packedColoMetrics: PackedColoMetricState[];
-		zoneCounts: {
-			total: number;
-			filtered: number;
-			processed: number;
-			skippedFreeTier: number;
-		};
-	}> {
+	/** Stream exporter snapshots sequentially across the account RPC boundary. */
+	async exportForPrometheus(options: {
+		packedMetricQueries: readonly PackedMetricQuery[];
+	}): Promise<Response> {
 		const config = await getConfig(this.env);
 		const logger = this.createLogger(config);
 
@@ -362,108 +365,136 @@ export class AccountMetricCoordinator extends DurableObject<Env> {
 		const isFreeTierAccount = cfFreeTierSet.has(state.accountId);
 
 		const accountQueries = getActiveAccountQueries(config, isFreeTierAccount);
-		const usePackedColoMetrics =
-			options.packedColoStorage && accountQueries.includes("colo-metrics");
-		let packedColoMetrics: PackedColoMetricState[] = [];
-		if (usePackedColoMetrics) {
-			try {
-				const exporter = await MetricExporter.get(
-					`account:${state.accountId}:colo-metrics`,
-					this.env,
-				);
-				const packedColoMetricState = await exporter.exportPackedColoMetrics();
-				packedColoMetrics =
-					packedColoMetricState === undefined ? [] : [packedColoMetricState];
-			} catch (error) {
-				const msg = error instanceof Error ? error.message : String(error);
-				logger.error("Failed to export account metrics", {
-					query: "colo-metrics",
-					error: msg,
-				});
-			}
-		}
-		const accountMetricQueries = usePackedColoMetrics
-			? accountQueries.filter((query) => query !== "colo-metrics")
-			: accountQueries;
-
-		// Collect from account-scoped exporters
-		const accountMetricsResults = await Promise.all(
-			accountMetricQueries.map(async (query) => {
-				try {
-					const exporter = await MetricExporter.get(
-						`account:${state.accountId}:${query}`,
-						this.env,
-					);
-					return await exporter.export();
-				} catch (error) {
-					const msg = error instanceof Error ? error.message : String(error);
-					logger.error("Failed to export account metrics", {
+		const enabledPackedMetricQueries = new Set(options.packedMetricQueries);
+		const modeFor = (query: MetricQueryName) =>
+			isPackedMetricQuery(query) && enabledPackedMetricQueries.has(query)
+				? "packed"
+				: "legacy";
+		const accountExports: PrometheusExportDescriptor[] = accountQueries.map(
+			(query) => ({
+				exporterId: `account:${state.accountId}:${query}`,
+				mode: modeFor(query),
+				query,
+			}),
+		);
+		const zoneExports: PrometheusExportDescriptor[] = isFreeTierAccount
+			? []
+			: ZONE_SCOPED_QUERIES.flatMap((query) =>
+					state.zones.map((zone) => ({
+						exporterId: `zone:${zone.id}:${query}`,
+						mode: modeFor(query),
 						query,
-						error: msg,
+						zone: zone.name,
+					})),
+				);
+		const exports = [...accountExports, ...zoneExports];
+		const resolvedExports = (
+			await Promise.all(
+				exports.map(async (descriptor) => {
+					try {
+						const exporter = await MetricExporter.get(
+							descriptor.exporterId,
+							this.env,
+						);
+						return { ...descriptor, exporter };
+					} catch (error) {
+						logger.error("Failed to initialize metric exporter", {
+							query: descriptor.query,
+							...(descriptor.zone && { zone: descriptor.zone }),
+							error: error instanceof Error ? error.message : String(error),
+						});
+						return undefined;
+					}
+				}),
+			)
+		).filter((descriptor) => descriptor !== undefined);
+		const orderedExports = [
+			...resolvedExports.filter((descriptor) => descriptor.mode === "legacy"),
+			...resolvedExports.filter((descriptor) => descriptor.mode === "packed"),
+		];
+		const processedZones = new Set<string>();
+		await Promise.all(
+			resolvedExports.map(async (descriptor) => {
+				try {
+					for (const zone of await descriptor.exporter.exportProcessedZones(
+						descriptor.mode,
+					)) {
+						processedZones.add(zone);
+					}
+				} catch (error) {
+					logger.error("Failed to export metric summary", {
+						query: descriptor.query,
+						...(descriptor.zone && { zone: descriptor.zone }),
+						error: error instanceof Error ? error.message : String(error),
 					});
-					return [];
 				}
 			}),
 		);
 
-		// Collect from zone-scoped exporters (skip for free tier accounts)
-		const zoneMetricsResults = isFreeTierAccount
-			? []
-			: await Promise.all(
-					state.zones.flatMap((zone) =>
-						ZONE_SCOPED_QUERIES.map(async (query) => {
-							try {
-								const exporter = await MetricExporter.get(
-									`zone:${zone.id}:${query}`,
-									this.env,
-								);
-								return await exporter.export();
-							} catch (error) {
-								const msg =
-									error instanceof Error ? error.message : String(error);
-								logger.error("Failed to export zone metrics", {
-									zone: zone.name,
-									query,
-									error: msg,
-								});
-								return [];
-							}
-						}),
+		return new Response(
+			createPrometheusStream(
+				this.exportPrometheusChunks(orderedExports, config, logger),
+			),
+			{
+				headers: {
+					"X-Metrics-Zones-Total": String(state.totalZoneCount),
+					"X-Metrics-Zones-Filtered": String(state.zones.length),
+					"X-Metrics-Zones-Processed": String(processedZones.size),
+					"X-Metrics-Zones-Skipped-Free-Tier": String(
+						state.zones.filter(isFreeTierZone).length,
 					),
-				);
+				},
+			},
+		);
+	}
 
-		const accountMetrics = accountMetricsResults.flat();
-		const allMetrics = [...accountMetrics, ...zoneMetricsResults.flat()];
-
-		// Count unique zones with metrics from all results
-		const zonesWithMetrics = new Set<string>();
-		for (const metric of allMetrics) {
-			for (const v of metric.values) {
-				const zone = v.labels.zone;
-				if (zone) {
-					zonesWithMetrics.add(zone);
+	private async *exportPrometheusChunks(
+		exports: readonly ResolvedPrometheusExport[],
+		config: ResolvedConfig,
+		logger: Logger,
+	): AsyncGenerator<Uint8Array, void> {
+		const denylist = [...parseCommaSeparated(config.metricsDenylist)];
+		const excludeLabels = config.excludeHost ? ["host"] : [];
+		for (const descriptor of exports) {
+			let reader: ReadableStreamDefaultReader<Uint8Array> | undefined;
+			let completed = false;
+			try {
+				const response = await descriptor.exporter.exportPrometheus({
+					packed: descriptor.mode === "packed",
+					denylist,
+					excludeLabels,
+				});
+				reader = response.body?.getReader();
+				if (reader === undefined) continue;
+				while (true) {
+					const next = await reader.read();
+					if (next.done) {
+						completed = true;
+						break;
+					}
+					yield next.value;
+				}
+			} catch (error) {
+				logger.error("Failed to stream metrics", {
+					query: descriptor.query,
+					...(descriptor.zone && { zone: descriptor.zone }),
+					error: error instanceof Error ? error.message : String(error),
+				});
+			} finally {
+				if (reader !== undefined) {
+					if (!completed) {
+						try {
+							await reader.cancel();
+						} catch (error) {
+							logger.debug("Failed to cancel metric stream", {
+								query: descriptor.query,
+								error: error instanceof Error ? error.message : String(error),
+							});
+						}
+					}
+					reader.releaseLock();
 				}
 			}
 		}
-		for (const state of packedColoMetrics) {
-			for (const zoneBucket of state.zones) {
-				if (zoneBucket.colo.length > 0) zonesWithMetrics.add(zoneBucket.zone);
-			}
-		}
-		const processedZones = zonesWithMetrics.size;
-
-		// Count free tier zones
-		const freeTierCount = state.zones.filter(isFreeTierZone).length;
-
-		return {
-			metrics: allMetrics,
-			packedColoMetrics,
-			zoneCounts: {
-				total: state.totalZoneCount,
-				filtered: state.zones.length,
-				processed: processedZones,
-				skippedFreeTier: freeTierCount,
-			},
-		};
 	}
 }

@@ -58,6 +58,14 @@ export const CounterStateSchema = z
 		lastIngest: z.number().int().nonnegative().optional(),
 		/** Zone label used to isolate expiry during partial query failures. */
 		scope: z.string().optional(),
+		/** Metric identity retained so dormant counters can migrate storage formats. */
+		metric: z
+			.object({
+				name: z.string(),
+				help: z.string(),
+				labels: z.record(z.string(), z.string()),
+			})
+			.optional(),
 	})
 	.readonly();
 

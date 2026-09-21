@@ -63,6 +63,11 @@ export function accumulateCounterMetrics(
 			counters[key] = {
 				accumulated,
 				missesRemaining: DEFAULT_STALE_COUNTER_MISSES,
+				metric: {
+					name: metric.name,
+					help: metric.help,
+					labels: value.labels,
+				},
 				...(options.ingestId === undefined
 					? {}
 					: { lastIngest: options.ingestId }),

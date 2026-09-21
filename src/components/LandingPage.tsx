@@ -1206,20 +1206,20 @@ export const LandingPage: FC<Props> = ({ config }) => {
 										</div>
 										<div>
 											<label
-												for="cfg-coloMetricsPackedStorage"
+												for="cfg-packedMetricStorage"
 												class="block text-sm font-medium text-gray-700 mb-2"
 											>
-												Packed Colo Storage
+												Packed Metric Storage
 											</label>
 											<div class="flex items-center justify-between">
 												<p class="text-xs text-gray-500">
-													Use compact storage for colo metrics
+													Use compact storage for high-cardinality metrics
 												</p>
 												<button
 													type="button"
-													id="cfg-coloMetricsPackedStorage"
+													id="cfg-packedMetricStorage"
 													class="toggle-switch"
-													onclick="toggleSwitch('coloMetricsPackedStorage')"
+													onclick="toggleSwitch('packedMetricStorage')"
 													role="switch"
 													aria-checked="false"
 												/>

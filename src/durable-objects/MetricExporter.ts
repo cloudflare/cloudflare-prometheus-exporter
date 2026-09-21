@@ -23,11 +23,21 @@ import {
 	mergeMetricDefinitions,
 } from "../lib/metrics";
 import {
-	accumulatePackedColoRows,
-	COLO_METRICS_QUERY_NAME,
-	type PackedColoMetricState,
-	PackedColoMetricStateSchema,
-} from "../lib/packed-colo-state";
+	type ColumnarMetricSource,
+	migrateLegacyColumnarMetricState,
+	serializeColumnarMetricStates,
+} from "../lib/packed-columnar-metric";
+import {
+	accumulatePackedMetricState,
+	isPackedMetricQuery,
+	PACKED_METRIC_STATE_KEY,
+	type PackedMetricState,
+	PackedMetricStateSchema,
+} from "../lib/packed-metric-state";
+import {
+	createPrometheusStream,
+	serializeToPrometheusChunks,
+} from "../lib/prometheus";
 import { getConfig, type ResolvedConfig } from "../lib/runtime-config";
 import { getTimeRange } from "../lib/time";
 import {
@@ -40,7 +50,26 @@ import {
 } from "../lib/types";
 
 const STATE_KEY = "state";
-const STATE_PACKED_COLO_METRICS_KEY = "packed-colo-metrics";
+const LegacyPackedColoStateSchema = z.object({
+	format: z.literal("colo-packed-by-zone-v2"),
+	accountId: z.string(),
+	accountName: z.string(),
+	queryName: z.literal("colo-metrics"),
+	lastFetch: z.number(),
+	lastIngest: z.number(),
+	zones: z.array(
+		z.object({
+			zone: z.string(),
+			colo: z.array(z.string()),
+			host: z.array(z.string()),
+			visits: z.array(z.number()),
+			edgeResponseBytes: z.array(z.number()),
+			requests: z.array(z.number()),
+			misses: z.array(z.number().int().nonnegative()),
+			lastIngest: z.array(z.number()),
+		}),
+	),
+});
 const ALARM_RECOVERY_DELAY_MS = 60 * 1000;
 /**
  * Maximum allowed hostnames in HOST_METRICS_ALLOWLIST.
@@ -58,6 +87,8 @@ const MetricExporterStateSchema = z.object({
 	counters: z.record(z.string(), CounterStateSchema),
 	metrics: z.array(MetricDefinitionSchema),
 	lastIngest: z.number(),
+	processedZones: z.array(z.string()).optional(),
+	processedZoneMode: z.enum(["legacy", "packed"]).optional(),
 
 	// Context for fetching (account-scoped)
 	accountId: z.string(),
@@ -82,10 +113,75 @@ type MetricExporterState = z.infer<typeof MetricExporterStateSchema>;
 
 type MetricFetchResult = {
 	metrics: MetricDefinition[];
+	packedMetrics?: ColumnarMetricSource[];
 	partialErrors: unknown[];
 	failedScopes: ReadonlySet<string>;
 	zoneRetryAfter: Record<string, number>;
 };
+
+function emptyMetricFetchResult(packed: boolean): MetricFetchResult {
+	return {
+		metrics: [],
+		...(packed ? { packedMetrics: [] } : {}),
+		partialErrors: [],
+		failedScopes: new Set(),
+		zoneRetryAfter: {},
+	};
+}
+
+function metricZones(metrics: readonly MetricDefinition[]): string[] {
+	const zones = new Set<string>();
+	for (const metric of metrics) {
+		for (const value of metric.values) {
+			const zone = value.labels.zone;
+			if (zone) zones.add(zone);
+		}
+	}
+	return [...zones];
+}
+
+function migrateLegacyPackedColoState(
+	legacy: z.infer<typeof LegacyPackedColoStateSchema>,
+): PackedMetricState {
+	const families = [
+		{
+			name: "cloudflare_zone_colocation_visits_total",
+			help: "Visits per colo",
+			type: "counter" as const,
+			column: "visits" as const,
+		},
+		{
+			name: "cloudflare_zone_colocation_edge_response_bytes_total",
+			help: "Edge response bytes per colo",
+			type: "counter" as const,
+			column: "edgeResponseBytes" as const,
+		},
+		{
+			name: "cloudflare_zone_colocation_requests_total",
+			help: "Requests per colo",
+			type: "counter" as const,
+			column: "requests" as const,
+		},
+	];
+	return PackedMetricStateSchema.parse({
+		format: "metric-columnar-v1",
+		lastIngest: legacy.lastIngest,
+		families: families.map(({ column: _, ...family }) => family),
+		zones: legacy.zones.map((zone) => ({
+			zone: zone.zone,
+			families: families.map((family, index) => ({
+				family: index,
+				labels: index === 0 ? { colo: zone.colo, host: zone.host } : {},
+				...(index === 0 ? {} : { labelsFrom: 0 }),
+				values: zone[family.column],
+				counter: {
+					misses: zone.misses,
+					lastIngest: zone.lastIngest,
+				},
+			})),
+		})),
+	});
+}
 
 /**
  * Durable Object that fetches and exports Prometheus metrics for a specific query scope.
@@ -195,6 +291,7 @@ export class MetricExporter extends DurableObject<Env> {
 			counters: {},
 			metrics: [],
 			lastIngest: 0,
+			processedZones: [],
 			accountId: "",
 			accountName: "",
 			zones: [],
@@ -354,7 +451,9 @@ export class MetricExporter extends DurableObject<Env> {
 		config: ResolvedConfig,
 		logger: Logger,
 	): Promise<void> {
-		const state = this.getState();
+		let state = this.getState();
+		const usePackedStorage =
+			isPackedMetricQuery(state.queryName) && config.packedMetricStorage;
 
 		// Skip if zone context not yet pushed (account-scoped needs zones)
 		if (state.scopeType === "account" && state.zones.length === 0) {
@@ -374,7 +473,16 @@ export class MetricExporter extends DurableObject<Env> {
 		if (state.scopeType === "zone") {
 			const cacheAgeMs = Date.now() - state.lastSslFetch;
 			const cacheTtlMs = config.sslCertsCacheTtlSeconds * 1000;
-			if (state.lastSslFetch > 0 && cacheAgeMs < cacheTtlMs) {
+			const hasCurrentRepresentation = usePackedStorage
+				? state.processedZoneMode !== "legacy" &&
+					(await this.loadPackedMetricState()) !== undefined
+				: state.processedZoneMode === "legacy" ||
+					(state.processedZoneMode === undefined && state.metrics.length > 0);
+			if (
+				state.lastSslFetch > 0 &&
+				cacheAgeMs < cacheTtlMs &&
+				hasCurrentRepresentation
+			) {
 				logger.debug("SSL cert cache fresh, skipping fetch", {
 					age_seconds: Math.floor(cacheAgeMs / 1000),
 					ttl_seconds: config.sslCertsCacheTtlSeconds,
@@ -388,6 +496,17 @@ export class MetricExporter extends DurableObject<Env> {
 		let nextRefreshDelaySeconds = config.metricRefreshIntervalSeconds;
 
 		try {
+			if (
+				usePackedStorage &&
+				(state.metrics.length > 0 || Object.keys(state.counters).length > 0)
+			) {
+				const migrated = await this.loadOrMigratePackedMetricState();
+				if (migrated !== undefined) {
+					state = { ...state, metrics: [], counters: {} };
+					this.state = state;
+				}
+			}
+
 			let result: MetricFetchResult;
 
 			if (state.scopeType === "account") {
@@ -399,25 +518,44 @@ export class MetricExporter extends DurableObject<Env> {
 					logger,
 				);
 			} else {
-				result = {
-					metrics: await this.fetchZoneScopedMetrics(client, state),
-					partialErrors: [],
-					failedScopes: new Set(),
-					zoneRetryAfter: {},
-				};
+				if (usePackedStorage && isPackedMetricQuery(state.queryName)) {
+					const zoneMetadata = state.zoneMetadata;
+					result = {
+						metrics: [],
+						packedMetrics:
+							zoneMetadata === null
+								? []
+								: await client.getPackedZoneMetrics(
+										state.queryName,
+										[zoneMetadata.id],
+										[zoneMetadata],
+										{},
+										timeRange,
+									),
+						partialErrors: [],
+						failedScopes: new Set(),
+						zoneRetryAfter: {},
+					};
+				} else {
+					result = {
+						metrics: await this.fetchZoneScopedMetrics(client, state),
+						partialErrors: [],
+						failedScopes: new Set(),
+						zoneRetryAfter: {},
+					};
+				}
 			}
 
 			const ingestId = new Date(timeRange.maxtime).getTime();
-			if (
-				config.coloMetricsPackedStorage &&
-				state.scopeType === "account" &&
-				state.queryName === COLO_METRICS_QUERY_NAME
-			) {
+			if (usePackedStorage) {
+				if (result.packedMetrics === undefined) {
+					throw new Error(
+						`Packed refresh did not return columnar output for ${state.queryName}`,
+					);
+				}
 				const currentState = this.getState();
-				// Packed colo counters live outside the generic MetricDefinition[] state.
-				await this.savePackedColoMetricState(
-					result.metrics,
-					currentState,
+				const packedState = await this.savePackedMetricState(
+					result.packedMetrics,
 					ingestId,
 					result.failedScopes,
 				);
@@ -426,7 +564,11 @@ export class MetricExporter extends DurableObject<Env> {
 					metrics: [],
 					counters: {},
 					lastIngest: ingestId,
+					processedZones: packedState.zones.map((zone) => zone.zone),
+					processedZoneMode: "packed",
 					lastRefresh: Date.now(),
+					lastSslFetch:
+						state.scopeType === "zone" ? Date.now() : currentState.lastSslFetch,
 					lastError: null,
 					zoneRetryAfter: result.zoneRetryAfter,
 				};
@@ -434,22 +576,19 @@ export class MetricExporter extends DurableObject<Env> {
 				this.state = refreshedState;
 
 				logger.info("Refresh complete", {
-					metric_count: result.metrics.length,
+					metric_count: result.packedMetrics.length,
 					partial_failure_count: result.partialErrors.length,
 				});
 				await this.scheduleNextAlarm(config, nextRefreshDelaySeconds);
 				return;
 			}
 
-			if (
-				state.scopeType === "account" &&
-				state.queryName === COLO_METRICS_QUERY_NAME
-			) {
+			if (isPackedMetricQuery(state.queryName)) {
 				// Packed storage is off: drop any packed snapshot so re-enabling the
 				// flag starts a fresh counter generation instead of reviving old totals.
 				await deleteChunkedValue(
 					chunkedDurableObjectStorage(this.ctx.storage),
-					STATE_PACKED_COLO_METRICS_KEY,
+					PACKED_METRIC_STATE_KEY,
 				);
 			}
 			const processed = accumulateCounterMetrics(
@@ -467,6 +606,8 @@ export class MetricExporter extends DurableObject<Env> {
 				metrics: processed.metrics,
 				counters: processed.counters,
 				lastIngest: ingestId,
+				processedZones: metricZones(processed.metrics),
+				processedZoneMode: "legacy",
 				lastRefresh: Date.now(),
 				lastSslFetch:
 					state.scopeType === "zone" ? Date.now() : currentState.lastSslFetch,
@@ -559,6 +700,8 @@ export class MetricExporter extends DurableObject<Env> {
 
 		// Zone-batched queries - fetch all zones in one GraphQL call
 		if (isZoneLevelQuery(queryName)) {
+			const usePackedStorage =
+				isPackedMetricQuery(queryName) && config.packedMetricStorage;
 			// Hostname metrics guardrails: parse allowlist once for both guard + query
 			let hostMetricsAllowlist: ReadonlySet<string> | undefined;
 			let hostMetricsDelaySeconds: number | undefined;
@@ -568,24 +711,14 @@ export class MetricExporter extends DurableObject<Env> {
 				const normalized = new Set([...parsed].map((h) => h.toLowerCase()));
 				if (normalized.size === 0) {
 					logger.debug("Hostname metrics disabled: empty allowlist");
-					return {
-						metrics: [],
-						partialErrors: [],
-						failedScopes: new Set(),
-						zoneRetryAfter: {},
-					};
+					return emptyMetricFetchResult(usePackedStorage);
 				}
 				if (normalized.size > MAX_HOSTNAME_ALLOWLIST_SIZE) {
 					logger.error("Hostname allowlist exceeds maximum size", {
 						size: normalized.size,
 						max: MAX_HOSTNAME_ALLOWLIST_SIZE,
 					});
-					return {
-						metrics: [],
-						partialErrors: [],
-						failedScopes: new Set(),
-						zoneRetryAfter: {},
-					};
+					return emptyMetricFetchResult(usePackedStorage);
 				}
 				// excludeHost strips host labels from all metrics in prometheus.ts,
 				// which would collapse distinct hostnames into duplicate gauge series
@@ -594,12 +727,7 @@ export class MetricExporter extends DurableObject<Env> {
 					logger.warn(
 						"Hostname metrics disabled: excludeHost=true strips host labels",
 					);
-					return {
-						metrics: [],
-						partialErrors: [],
-						failedScopes: new Set(),
-						zoneRetryAfter: {},
-					};
+					return emptyMetricFetchResult(usePackedStorage);
 				}
 				hostMetricsAllowlist = normalized;
 				hostMetricsDelaySeconds = config.hostMetricsDelaySeconds;
@@ -621,12 +749,7 @@ export class MetricExporter extends DurableObject<Env> {
 
 				if (zonesToQuery.length === 0) {
 					logger.info("No paid tier zones to query");
-					return {
-						metrics: [],
-						partialErrors: [],
-						failedScopes: new Set(),
-						zoneRetryAfter: {},
-					};
+					return emptyMetricFetchResult(usePackedStorage);
 				}
 			}
 
@@ -636,6 +759,24 @@ export class MetricExporter extends DurableObject<Env> {
 
 			if (zonesToQuery.length <= ZONES_PER_CHUNK) {
 				const zoneIds = zonesToQuery.map((z) => z.id);
+				if (isPackedMetricQuery(queryName) && config.packedMetricStorage) {
+					return {
+						metrics: [],
+						packedMetrics: await client.getPackedZoneMetrics(
+							queryName,
+							zoneIds,
+							zonesToQuery,
+							firewallRules,
+							timeRange,
+							hostMetricsAllowlist,
+							hostMetricsDelaySeconds,
+							config.httpStatusGroup,
+						),
+						partialErrors: [],
+						failedScopes: new Set(),
+						zoneRetryAfter: {},
+					};
+				}
 				return {
 					metrics: await client.getZoneMetrics(
 						queryName,
@@ -646,7 +787,7 @@ export class MetricExporter extends DurableObject<Env> {
 						hostMetricsAllowlist,
 						hostMetricsDelaySeconds,
 						config.httpStatusGroup,
-						config.coloMetricsPackedStorage,
+						config.packedMetricStorage,
 					),
 					partialErrors: [],
 					failedScopes: new Set(),
@@ -655,6 +796,7 @@ export class MetricExporter extends DurableObject<Env> {
 			}
 
 			const chunkResults: MetricDefinition[][] = [];
+			let packedMetrics: ColumnarMetricSource[] | undefined;
 			const partialErrors: unknown[] = [];
 			const failedScopes = new Set<string>();
 			const currentZoneIds = new Set(zonesToQuery.map((zone) => zone.id));
@@ -684,19 +826,36 @@ export class MetricExporter extends DurableObject<Env> {
 				const chunkIds = chunkZones.map((z) => z.id);
 
 				try {
-					const metrics = await client.getZoneMetrics(
-						queryName,
-						chunkIds,
-						chunkZones,
-						firewallRules,
-						timeRange,
-						hostMetricsAllowlist,
-						hostMetricsDelaySeconds,
-						config.httpStatusGroup,
-						config.coloMetricsPackedStorage,
-					);
+					if (isPackedMetricQuery(queryName) && config.packedMetricStorage) {
+						packedMetrics = [
+							...(packedMetrics ?? []),
+							...(await client.getPackedZoneMetrics(
+								queryName,
+								chunkIds,
+								chunkZones,
+								firewallRules,
+								timeRange,
+								hostMetricsAllowlist,
+								hostMetricsDelaySeconds,
+								config.httpStatusGroup,
+							)),
+						];
+					} else {
+						chunkResults.push(
+							await client.getZoneMetrics(
+								queryName,
+								chunkIds,
+								chunkZones,
+								firewallRules,
+								timeRange,
+								hostMetricsAllowlist,
+								hostMetricsDelaySeconds,
+								config.httpStatusGroup,
+								config.packedMetricStorage,
+							),
+						);
+					}
 					for (const zoneId of chunkIds) delete zoneRetryAfter[zoneId];
-					chunkResults.push(metrics);
 				} catch (error) {
 					firstChunkError ??= error;
 					partialErrors.push(error);
@@ -727,11 +886,22 @@ export class MetricExporter extends DurableObject<Env> {
 				}
 			}
 
-			if (chunkResults.length === 0 && firstChunkError !== undefined) {
+			if (
+				chunkResults.length === 0 &&
+				packedMetrics === undefined &&
+				firstChunkError !== undefined
+			) {
 				throw longestRetryError ?? firstChunkError;
 			}
+			if (usePackedStorage && queryableZones.length === 0) {
+				packedMetrics = [];
+			}
 			return {
-				metrics: mergeMetricDefinitions(...chunkResults),
+				metrics:
+					packedMetrics === undefined
+						? mergeMetricDefinitions(...chunkResults)
+						: [],
+				packedMetrics,
 				partialErrors,
 				failedScopes,
 				zoneRetryAfter,
@@ -777,41 +947,74 @@ export class MetricExporter extends DurableObject<Env> {
 		}
 	}
 
-	private async loadPackedColoMetricState(): Promise<
-		PackedColoMetricState | undefined
+	private async loadPackedMetricState(): Promise<
+		PackedMetricState | undefined
 	> {
-		return loadChunkedValue(
+		const stored = await loadChunkedValue(
 			chunkedDurableObjectStorage(this.ctx.storage),
-			STATE_PACKED_COLO_METRICS_KEY,
-			PackedColoMetricStateSchema,
+			PACKED_METRIC_STATE_KEY,
+			z.unknown(),
 		);
+		if (stored === undefined) return undefined;
+		const packed = PackedMetricStateSchema.safeParse(stored);
+		if (packed.success) return packed.data;
+		const legacy = LegacyPackedColoStateSchema.safeParse(stored);
+		if (legacy.success) {
+			const migrated = migrateLegacyPackedColoState(legacy.data);
+			await saveChunkedValue(
+				chunkedDurableObjectStorage(this.ctx.storage),
+				PACKED_METRIC_STATE_KEY,
+				migrated,
+			);
+			return migrated;
+		}
+		return PackedMetricStateSchema.parse(stored);
 	}
 
-	private async savePackedColoMetricState(
-		metrics: MetricDefinition[],
-		state: MetricExporterState,
-		ingestId: number,
-		failedScopes: ReadonlySet<string>,
-	): Promise<void> {
-		const previous = await this.loadPackedColoMetricState();
+	private async loadOrMigratePackedMetricState(): Promise<
+		PackedMetricState | undefined
+	> {
+		const stored = await this.loadPackedMetricState();
+		if (stored !== undefined) return stored;
+
+		const state = this.getState();
+		if (
+			state.metrics.length === 0 &&
+			Object.keys(state.counters).length === 0
+		) {
+			return undefined;
+		}
+		const migrated = migrateLegacyColumnarMetricState({
+			metrics: state.metrics,
+			ingestId: state.lastIngest,
+			counters: state.counters,
+		});
 		await saveChunkedValue(
 			chunkedDurableObjectStorage(this.ctx.storage),
-			STATE_PACKED_COLO_METRICS_KEY,
-			{
-				format: "colo-packed-by-zone-v2",
-				accountId: state.accountId,
-				accountName: state.accountName,
-				queryName: COLO_METRICS_QUERY_NAME,
-				lastFetch: Date.now(),
-				lastIngest: ingestId,
-				zones: accumulatePackedColoRows(
-					previous,
-					metrics,
-					ingestId,
-					failedScopes,
-				),
-			} satisfies PackedColoMetricState,
+			PACKED_METRIC_STATE_KEY,
+			migrated,
 		);
+		return migrated;
+	}
+
+	private async savePackedMetricState(
+		metrics: ColumnarMetricSource[],
+		ingestId: number,
+		failedScopes: ReadonlySet<string>,
+	): Promise<PackedMetricState> {
+		const previous = await this.loadOrMigratePackedMetricState();
+		const packed = accumulatePackedMetricState({
+			previous,
+			metrics,
+			ingestId,
+			failedScopes,
+		});
+		await saveChunkedValue(
+			chunkedDurableObjectStorage(this.ctx.storage),
+			PACKED_METRIC_STATE_KEY,
+			packed,
+		);
+		return packed;
 	}
 
 	/** Persist state in bounded storage chunks before publishing it in memory. */
@@ -832,15 +1035,67 @@ export class MetricExporter extends DurableObject<Env> {
 		return this.getState().metrics;
 	}
 
-	/** Packed colo counters, or undefined until the first packed refresh has run. */
-	async exportPackedColoMetrics(): Promise<PackedColoMetricState | undefined> {
+	/** Return only the zone summary needed for exporter health metrics. */
+	async exportProcessedZones(mode: "legacy" | "packed"): Promise<string[]> {
 		const state = this.getState();
 		if (
-			state.scopeType !== "account" ||
-			state.queryName !== COLO_METRICS_QUERY_NAME
+			state.processedZoneMode === mode &&
+			state.processedZones !== undefined
 		) {
+			return state.processedZones;
+		}
+		if (mode === "legacy") return metricZones(state.metrics);
+		const packed = await this.loadOrMigratePackedMetricState();
+		return packed?.zones.map((zone) => zone.zone) ?? [];
+	}
+
+	/** Stream one cached snapshot without crossing the RPC value-size limit. */
+	async exportPrometheus(options: {
+		packed: boolean;
+		denylist: string[];
+		excludeLabels: string[];
+	}): Promise<Response> {
+		const chunks = this.exportPrometheusChunks(options);
+		return new Response(createPrometheusStream(chunks), {
+			headers: { "Content-Type": "text/plain; charset=utf-8" },
+		});
+	}
+
+	private async *exportPrometheusChunks(options: {
+		packed: boolean;
+		denylist: string[];
+		excludeLabels: string[];
+	}): AsyncGenerator<string, void> {
+		const serializeOptions = {
+			denylist: new Set(options.denylist),
+			excludeLabels: new Set(options.excludeLabels),
+		};
+		if (options.packed) {
+			const packed = await this.exportPackedMetrics({
+				migrateLegacyMetrics: true,
+			});
+			if (packed !== undefined) {
+				yield* serializeColumnarMetricStates([packed], serializeOptions);
+			}
+			return;
+		}
+
+		yield* serializeToPrometheusChunks(
+			this.getState().metrics,
+			serializeOptions,
+		);
+	}
+
+	/** Packed counters, optionally migrated from the currently exported metrics. */
+	async exportPackedMetrics(options?: {
+		migrateLegacyMetrics?: boolean;
+	}): Promise<PackedMetricState | undefined> {
+		const state = this.getState();
+		if (!isPackedMetricQuery(state.queryName)) {
 			return undefined;
 		}
-		return this.loadPackedColoMetricState();
+		return options?.migrateLegacyMetrics
+			? this.loadOrMigratePackedMetricState()
+			: this.loadPackedMetricState();
 	}
 }

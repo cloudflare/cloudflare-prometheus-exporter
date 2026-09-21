@@ -1,70 +1,56 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { MetricDefinition } from "../lib/metrics";
-import type {
-	PackedColoMetricState,
-	PackedColoZone,
-} from "../lib/packed-colo-state";
+import { serializeColumnarMetricStates } from "../lib/packed-columnar-metric";
+import {
+	accumulatePackedMetricState,
+	type PackedMetricState,
+} from "../lib/packed-metric-state";
 import { serializeToPrometheus } from "../lib/prometheus";
 import { MetricCoordinator } from "./MetricCoordinator";
 
 const requestsName = "cloudflare_zone_colocation_requests_total";
 
-type Row = { host: string; value: number; misses?: number };
+type Row = { host: string; value: number };
 
-function packedState(rows: Row[]): PackedColoMetricState {
-	const zone: PackedColoZone = {
-		zone: "example.com",
-		colo: rows.map(() => "SJC"),
-		host: rows.map((row) => row.host),
-		visits: rows.map((row) => row.value),
-		edgeResponseBytes: rows.map((row) => row.value),
-		requests: rows.map((row) => row.value),
-		misses: rows.map((row) => row.misses ?? 5),
-		lastIngest: rows.map(() => 1),
-	};
-	return {
-		format: "colo-packed-by-zone-v2",
-		accountId: "account-a",
-		accountName: "Account",
-		queryName: "colo-metrics",
-		lastFetch: 1,
-		lastIngest: 1,
-		zones: [zone],
-	};
-}
-
-function expectedMetrics(state: PackedColoMetricState): MetricDefinition[] {
+function expectedMetrics(rows: Row[]): MetricDefinition[] {
 	return (
 		[
-			["cloudflare_zone_colocation_visits_total", "Visits per colo", "visits"],
+			["cloudflare_zone_colocation_visits_total", "Visits per colo"],
 			[
 				"cloudflare_zone_colocation_edge_response_bytes_total",
 				"Edge response bytes per colo",
-				"edgeResponseBytes",
 			],
-			[requestsName, "Requests per colo", "requests"],
+			[requestsName, "Requests per colo"],
 		] as const
-	).map(([name, help, column]) => ({
+	).map(([name, help]) => ({
 		name,
 		help,
 		type: "counter" as const,
-		values: state.zones.flatMap((zone) =>
-			zone.colo.map((colo, i) => ({
-				labels: { zone: zone.zone, colo, host: zone.host[i] ?? "" },
-				value: zone[column][i] ?? 0,
-			})),
-		),
+		values: rows.map((row) => ({
+			labels: { zone: "example.com", colo: "SJC", host: row.host },
+			value: row.value,
+		})),
 	}));
 }
 
+function packedState(rows: Row[]): PackedMetricState {
+	return accumulatePackedMetricState({
+		previous: undefined,
+		metrics: expectedMetrics(rows),
+		ingestId: 1,
+		failedScopes: new Set(),
+	});
+}
+
 async function createCoordinator(
-	packed: PackedColoMetricState[],
+	packedStates: PackedMetricState[],
 	legacy: MetricDefinition[] = [],
 	overrides: {
 		excludeHost?: boolean;
 		metricsDenylist?: string;
 		coloMetricsPackedStorage?: boolean;
 	} = {},
+	onPackedExport: (index: number) => void = () => {},
 ) {
 	let ready = Promise.resolve();
 	const ctx = {
@@ -93,25 +79,61 @@ async function createCoordinator(
 			getByName: (id: string) => ({
 				initialize: async () => {},
 				// Mirrors AccountMetricCoordinator: the caller's mode decides which
-				// representation colo metrics use for this scrape.
+				// representation packed metrics use for this scrape.
 				exportForPrometheus: async (options: {
-					packedColoStorage: boolean;
-				}) => ({
-					metrics:
-						id === "account:account-a" || options.packedColoStorage
-							? []
-							: legacy,
-					packedColoMetrics:
-						id === "account:account-a" && options.packedColoStorage
-							? packed
-							: [],
-					zoneCounts: {
-						total: 1,
-						filtered: 1,
-						processed: 1,
-						skippedFreeTier: 0,
-					},
-				}),
+					packedMetricQueries: readonly string[];
+				}) => {
+					const packedStorage =
+						options.packedMetricQueries.includes("colo-metrics");
+					const serializeOptions = {
+						denylist: new Set(
+							overrides.metricsDenylist ? [overrides.metricsDenylist] : [],
+						),
+						excludeLabels: overrides.excludeHost
+							? new Set(["host"])
+							: undefined,
+					};
+					const states = packedStorage
+						? id === "account:account-a"
+							? packedStates
+									.slice(0, 1)
+									.map((state, index) => ({ state, index }))
+							: packedStates.slice(1).map((state, index) => ({
+									state,
+									index: index + 1,
+								}))
+						: [];
+					const chunks = (function* () {
+						for (const { state, index } of states) {
+							try {
+								onPackedExport(index);
+								yield* serializeColumnarMetricStates([state], serializeOptions);
+							} catch {}
+						}
+						if (id === "account:account-b" && !packedStorage) {
+							yield serializeToPrometheus(legacy, serializeOptions);
+						}
+					})();
+					const encoder = new TextEncoder();
+					return new Response(
+						new ReadableStream({
+							type: "bytes",
+							pull(controller) {
+								const next = chunks.next();
+								if (next.done) controller.close();
+								else controller.enqueue(encoder.encode(next.value));
+							},
+						}),
+						{
+							headers: {
+								"X-Metrics-Zones-Total": "1",
+								"X-Metrics-Zones-Filtered": "1",
+								"X-Metrics-Zones-Processed": "1",
+								"X-Metrics-Zones-Skipped-Free-Tier": "0",
+							},
+						},
+					);
+				},
 			}),
 		},
 	};
@@ -137,14 +159,28 @@ afterEach(() => {
 });
 
 describe("MetricCoordinator packed colo output", () => {
+	it("emits exporter families before packed zone families", async () => {
+		const coordinator = await createCoordinator([
+			packedState([{ host: "www.example.com", value: 1 }]),
+		]);
+		const text = await (
+			await coordinator.fetch(new Request("https://test/export"))
+		).text();
+
+		expect(text.indexOf("# HELP cloudflare_exporter_up")).toBeLessThan(
+			text.indexOf("# HELP cloudflare_zone_colocation_visits_total"),
+		);
+	});
+
 	it.each([
 		false,
 		true,
 	])("matches legacy serialization including escaping and excludeHost=%s", async (excludeHost) => {
-		const state = packedState([
+		const rows = [
 			{ host: 'www.\\\\"\nexample.com', value: 10 },
 			{ host: "other.example.com", value: 20 },
-		]);
+		];
+		const state = packedState(rows);
 		const coordinator = await createCoordinator([state], [], {
 			excludeHost,
 			metricsDenylist: requestsName,
@@ -155,7 +191,7 @@ describe("MetricCoordinator packed colo output", () => {
 		expect(response.status).toBe(200);
 		expect(coloOutput(await response.text())).toEqual(
 			coloOutput(
-				serializeToPrometheus(expectedMetrics(state), {
+				serializeToPrometheus(expectedMetrics(rows), {
 					excludeLabels: excludeHost ? new Set(["host"]) : undefined,
 					denylist: new Set([requestsName]),
 				}),
@@ -174,27 +210,47 @@ describe("MetricCoordinator packed colo output", () => {
 			new Request("https://test/export"),
 		);
 		expect(coloOutput(await response.text())).toEqual(
-			coloOutput(serializeToPrometheus(expectedMetrics(state))),
+			coloOutput(
+				serializeToPrometheus(
+					expectedMetrics(
+						[
+							0,
+							Number.NaN,
+							Number.POSITIVE_INFINITY,
+							Number.NEGATIVE_INFINITY,
+						].map((value, index) => ({
+							host: `host-${index}.example.com`,
+							value,
+						})),
+					),
+				),
+			),
 		);
 	});
 
 	it("does not serialize the whole packed snapshot before a slow reader consumes it", async () => {
 		let visitsRead = 0;
+		const exportedSnapshots: number[] = [];
 		const rows = Array.from({ length: 5000 }, (_, index) => ({
 			host: `host-${index}.example.com`,
 			value: 10,
 		}));
 		const state = packedState(rows);
-		const zone = state.zones[0];
-		if (zone === undefined) throw new Error("fixture has no zone");
-		zone.visits = new Proxy(zone.visits, {
+		const visits = state.zones[0]?.families[0];
+		if (visits === undefined) throw new Error("fixture has no visits table");
+		visits.values = new Proxy(visits.values, {
 			get(target, property, receiver) {
 				if (typeof property === "string" && /^\d+$/.test(property))
 					visitsRead++;
 				return Reflect.get(target, property, receiver);
 			},
 		});
-		const coordinator = await createCoordinator([state]);
+		const coordinator = await createCoordinator(
+			[state, packedState([{ host: "second.example.com", value: 1 }])],
+			[],
+			{},
+			(index) => exportedSnapshots.push(index),
+		);
 		const response = await coordinator.fetch(
 			new Request("https://test/export"),
 		);
@@ -208,15 +264,39 @@ describe("MetricCoordinator packed colo output", () => {
 		const readsAtCancel = visitsRead;
 		await new Promise((resolve) => setTimeout(resolve, 0));
 		expect(visitsRead).toBe(readsAtCancel);
+		expect(exportedSnapshots).toEqual([]);
+	});
+
+	it("continues with the next exporter when one snapshot fails", async () => {
+		vi.spyOn(console, "log").mockImplementation(() => {});
+		const coordinator = await createCoordinator(
+			[
+				packedState([{ host: "failed.example.com", value: 1 }]),
+				packedState([{ host: "successful.example.com", value: 2 }]),
+			],
+			[],
+			{},
+			(index) => {
+				if (index === 0) throw new Error("snapshot unavailable");
+			},
+		);
+
+		const text = await (
+			await coordinator.fetch(new Request("https://test/export"))
+		).text();
+
+		expect(text).not.toContain("failed.example.com");
+		expect(text).toContain("successful.example.com");
 	});
 
 	it("passes one storage mode to every account so HELP/TYPE appear once", async () => {
-		const legacy = expectedMetrics(
-			packedState([{ host: "b.example.com", value: 1 }]),
-		);
+		const legacy = expectedMetrics([{ host: "b.example.com", value: 1 }]);
 		for (const coloMetricsPackedStorage of [true, false]) {
 			const coordinator = await createCoordinator(
-				[packedState([{ host: "a.example.com", value: 1 }])],
+				[
+					packedState([{ host: "a.example.com", value: 1 }]),
+					packedState([{ host: "b.example.com", value: 1 }]),
+				],
 				legacy,
 				{ coloMetricsPackedStorage },
 			);

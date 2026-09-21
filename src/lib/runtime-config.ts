@@ -28,6 +28,8 @@ export const ConfigKeySchema = z.enum([
 	// Output options
 	"excludeHost",
 	"httpStatusGroup",
+	"packedMetricStorage",
+	// Deprecated alias for packedMetricStorage, still accepted for rollbacks
 	"coloMetricsPackedStorage",
 	// Hostname metrics
 	"hostMetricsAllowlist",
@@ -59,6 +61,7 @@ const ConfigValueSchemas = {
 	metricsDenylist: z.string(),
 	excludeHost: z.boolean(),
 	httpStatusGroup: z.boolean(),
+	packedMetricStorage: z.boolean(),
 	coloMetricsPackedStorage: z.boolean(),
 	hostMetricsAllowlist: z.string(),
 	hostMetricsDelaySeconds: z.number().int().min(30),
@@ -90,6 +93,7 @@ export const ConfigOverridesSchema = z
 		metricsDenylist: ConfigValueSchemas.metricsDenylist.optional(),
 		excludeHost: ConfigValueSchemas.excludeHost.optional(),
 		httpStatusGroup: ConfigValueSchemas.httpStatusGroup.optional(),
+		packedMetricStorage: ConfigValueSchemas.packedMetricStorage.optional(),
 		coloMetricsPackedStorage:
 			ConfigValueSchemas.coloMetricsPackedStorage.optional(),
 		hostMetricsAllowlist: ConfigValueSchemas.hostMetricsAllowlist.optional(),
@@ -125,6 +129,7 @@ export const ResolvedConfigSchema = z
 		metricsDenylist: ConfigValueSchemas.metricsDenylist,
 		excludeHost: ConfigValueSchemas.excludeHost,
 		httpStatusGroup: ConfigValueSchemas.httpStatusGroup,
+		packedMetricStorage: ConfigValueSchemas.packedMetricStorage,
 		coloMetricsPackedStorage: ConfigValueSchemas.coloMetricsPackedStorage,
 		hostMetricsAllowlist: ConfigValueSchemas.hostMetricsAllowlist,
 		hostMetricsDelaySeconds: ConfigValueSchemas.hostMetricsDelaySeconds,
@@ -146,8 +151,21 @@ type OptionalEnvVars = {
 	CF_FREE_TIER_ACCOUNTS?: string;
 	HEALTH_CHECK_CACHE_TTL_SECONDS?: string;
 	HOST_METRICS_ALLOWLIST?: string;
+	PACKED_METRIC_STORAGE?: string;
+	/** Deprecated alias for PACKED_METRIC_STORAGE. */
 	COLO_METRICS_PACKED_STORAGE?: string;
 };
+
+/** Parses a boolean env var, treating an unset value as absent. */
+function parseOptionalBoolean(
+	value: string | boolean | undefined,
+): boolean | undefined {
+	if (value === undefined) return undefined;
+	if (typeof value === "boolean") return value;
+	const normalized = value.trim().toLowerCase();
+	if (normalized === "") return undefined;
+	return normalized === "true";
+}
 /**
  * Gets default configuration values from environment variables.
  *
@@ -156,6 +174,10 @@ type OptionalEnvVars = {
  */
 export function getEnvDefaults(env: Env): ResolvedConfig {
 	const optionalEnv = env as Env & OptionalEnvVars;
+	const packedMetricStorageDefault =
+		parseOptionalBoolean(optionalEnv.PACKED_METRIC_STORAGE) ??
+		parseOptionalBoolean(optionalEnv.COLO_METRICS_PACKED_STORAGE) ??
+		false;
 	return {
 		queryLimit: z.coerce.number().catch(10000).parse(env.QUERY_LIMIT),
 		scrapeDelaySeconds: z.coerce
@@ -200,11 +222,8 @@ export function getEnvDefaults(env: Env): ResolvedConfig {
 			.boolean()
 			.catch(false)
 			.parse(env.CF_HTTP_STATUS_GROUP),
-		coloMetricsPackedStorage:
-			typeof optionalEnv.COLO_METRICS_PACKED_STORAGE === "boolean"
-				? optionalEnv.COLO_METRICS_PACKED_STORAGE
-				: optionalEnv.COLO_METRICS_PACKED_STORAGE?.trim().toLowerCase() ===
-					"true",
+		packedMetricStorage: packedMetricStorageDefault,
+		coloMetricsPackedStorage: packedMetricStorageDefault,
 		hostMetricsAllowlist: optionalEnv.HOST_METRICS_ALLOWLIST?.trim() ?? "",
 		hostMetricsDelaySeconds: z.coerce
 			.number()
@@ -263,6 +282,10 @@ function mergeConfig(
 	defaults: ResolvedConfig,
 	overrides: ConfigOverrides,
 ): ResolvedConfig {
+	const packedMetricStorage =
+		overrides.packedMetricStorage ??
+		overrides.coloMetricsPackedStorage ??
+		defaults.packedMetricStorage;
 	return {
 		queryLimit: overrides.queryLimit ?? defaults.queryLimit,
 		scrapeDelaySeconds:
@@ -295,8 +318,8 @@ function mergeConfig(
 		metricsDenylist: overrides.metricsDenylist ?? defaults.metricsDenylist,
 		excludeHost: overrides.excludeHost ?? defaults.excludeHost,
 		httpStatusGroup: overrides.httpStatusGroup ?? defaults.httpStatusGroup,
-		coloMetricsPackedStorage:
-			overrides.coloMetricsPackedStorage ?? defaults.coloMetricsPackedStorage,
+		packedMetricStorage,
+		coloMetricsPackedStorage: packedMetricStorage,
 		hostMetricsAllowlist:
 			overrides.hostMetricsAllowlist ?? defaults.hostMetricsAllowlist,
 		hostMetricsDelaySeconds:

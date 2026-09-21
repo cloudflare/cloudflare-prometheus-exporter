@@ -25,6 +25,14 @@ describe("accumulateCounterMetrics", () => {
 			result.counters["cloudflare_requests_total{country=US,zone=example.com}"]
 				?.accumulated,
 		).toBe(42);
+		expect(
+			result.counters["cloudflare_requests_total{country=US,zone=example.com}"]
+				?.metric,
+		).toEqual({
+			name: "cloudflare_requests_total",
+			help: "Total requests",
+			labels: { country: "US", zone: "example.com" },
+		});
 	});
 
 	it("accumulates repeated counter observations", () => {

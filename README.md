@@ -56,7 +56,7 @@ Set in `wrangler.jsonc` or via `wrangler secret put`:
 | `HEALTH_CHECK_CACHE_TTL_SECONDS` | 10 | Health check cache TTL |
 | `EXCLUDE_HOST` | false | Exclude host labels from metrics |
 | `CF_HTTP_STATUS_GROUP` | false | Group HTTP status codes (2xx, 4xx, etc.) |
-| `COLO_METRICS_PACKED_STORAGE` | false | Enable compact by-zone storage and chunked read output for high-cardinality `colo-metrics` rollouts. Metric names and labels are unchanged. |
+| `PACKED_METRIC_STORAGE` | false | Enable compact storage and chunked output for zone metrics. Accepts the deprecated name `COLO_METRICS_PACKED_STORAGE`. |
 | `DISABLE_UI` | false | Disable landing page (returns 404) |
 | `DISABLE_CONFIG_API` | false | Disable config API endpoints (returns 404) |
 | `METRICS_DENYLIST` | - | Comma-separated list of metrics to exclude |
@@ -157,7 +157,8 @@ Override configuration at runtime without redeployment. Overrides persist in KV 
 | `metricsDenylist` | string | Comma-separated metrics to exclude |
 | `excludeHost` | boolean | Exclude host labels |
 | `httpStatusGroup` | boolean | Group HTTP status codes |
-| `coloMetricsPackedStorage` | boolean | Enable compact by-zone storage and chunked read output for `colo-metrics` |
+| `packedMetricStorage` | boolean | Enable compact by-zone storage and chunked read output for supported high-cardinality queries, including edge-country, health-check, and hostname HTTP metrics |
+| `coloMetricsPackedStorage` | boolean | Deprecated alias for `packedMetricStorage` |
 | `hostMetricsAllowlist` | string | Comma-separated hostnames for hostname-level metrics |
 | `hostMetricsDelaySeconds` | number | Ingestion delay for hostname metrics (seconds) |
 
@@ -180,8 +181,8 @@ curl -X PUT https://your-worker.workers.dev/config/cfZones \
   -H "Content-Type: application/json" \
   -d '{"value": "zone-id-1,zone-id-2"}'
 
-# Enable compact colo metric storage for trial rollout
-curl -X PUT https://your-worker.workers.dev/config/coloMetricsPackedStorage \
+# Enable compact packed metric storage for trial rollout
+curl -X PUT https://your-worker.workers.dev/config/packedMetricStorage \
   -H "Content-Type: application/json" \
   -d '{"value": true}'
 
@@ -192,14 +193,16 @@ curl -X DELETE https://your-worker.workers.dev/config/logLevel
 curl -X DELETE https://your-worker.workers.dev/config
 ```
 
-### Packed colo storage
+### Packed metric storage
 
-`coloMetricsPackedStorage` stores `colo-metrics` in columnar form (one array per field, per zone) instead of three label-repeating metric families, and streams the output in bounded chunks. Metric names and labels are unchanged.
+`packedMetricStorage` stores selected queries in compact typed state with named label columns instead of label-repeating rows, and streams the output in bounded chunks. Metric names and labels are unchanged.
 
-- Toggling the flag in either direction **resets the colo counters** (Prometheus `rate()`/`increase()` handle counter resets). Disabling deletes the packed snapshot on the next refresh, so re-enabling starts from zero rather than reviving old totals. Colo metrics are absent until the first successful refresh in the new mode.
-- The storage mode is resolved once per scrape and applied to every account, so a scrape never mixes packed and unpacked colo output.
-- A `zone`/`colo`/`host` row is observed as a unit: the three counters share one retry checkpoint, and a counter Cloudflare omits for an observed row is recorded as `0`. Rows not seen for five refreshes are dropped; until then they are exported with their last value (a flat counter), whereas the unpacked path stops exporting a series the moment it is absent.
-- The 16 MiB serialized-state guard (`Chunked storage value exceeds the safe size limit`) still applies. At ~55 bytes per unique row, 150,000 rows (450,000 samples) use ~8 MiB; the ceiling is roughly 280,000 rows with typical hostnames.
+- Enabling packed storage migrates active and retained counters before adding the next window. Disabling deletes packed snapshots and starts a fresh unpacked counter generation on the next refresh.
+- The storage mode is resolved once per scrape and applied to every account, so a scrape never mixes packed and unpacked output for the same metric family.
+- Each counter series stores its own retry checkpoint. Replaying the same query window is idempotent. Series not seen for five refreshes are dropped; until then they are exported with their last value (a flat counter), whereas the unpacked path stops exporting a series the moment it is absent.
+- When `excludeHost` is set, packed rows that collapse onto the same remaining labels are summed, matching the unpacked serializer.
+- Packed queries keep their existing metric families. `colo-metrics` uses its reduced packed query, health checks use separate event and timing aliases, and hostname metrics preserve their four aliases and fixed one-minute window.
+- The 16 MiB serialized-state guard (`Chunked storage value exceeds the safe size limit`) still applies per query. Families with identical label columns share one copy, keeping high-cardinality multi-family queries such as `colo-metrics` within the guard.
 
 ## Available Metrics
 

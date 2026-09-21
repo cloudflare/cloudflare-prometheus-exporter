@@ -23,7 +23,7 @@ export const LandingPageScript: FC<Props> = ({
 				'queryLimit', 'scrapeDelaySeconds', 'timeWindowSeconds', 'metricRefreshIntervalSeconds',
 				'accountListCacheTtlSeconds', 'zoneListCacheTtlSeconds', 'sslCertsCacheTtlSeconds',
 				'logLevel', 'logFormat', 'cfAccounts', 'cfZones', 'cfFreeTierAccounts', 'metricsDenylist',
-				'excludeHost', 'httpStatusGroup', 'coloMetricsPackedStorage', 'hostMetricsAllowlist', 'hostMetricsDelaySeconds'
+				'excludeHost', 'httpStatusGroup', 'packedMetricStorage', 'hostMetricsAllowlist', 'hostMetricsDelaySeconds'
 			];
 
 			// Load config on page load
@@ -83,7 +83,7 @@ export const LandingPageScript: FC<Props> = ({
 				});
 
 				// Toggle switches
-				['excludeHost', 'httpStatusGroup', 'coloMetricsPackedStorage'].forEach(key => {
+				['excludeHost', 'httpStatusGroup', 'packedMetricStorage'].forEach(key => {
 					const el = document.getElementById('cfg-' + key);
 					if (el) {
 						const isActive = localConfig[key] === true;
@@ -196,7 +196,7 @@ export const LandingPageScript: FC<Props> = ({
 				const el = document.getElementById('cfg-' + key);
 				if (!el) return;
 
-				if (['excludeHost', 'httpStatusGroup', 'coloMetricsPackedStorage'].includes(key)) {
+				if (['excludeHost', 'httpStatusGroup', 'packedMetricStorage'].includes(key)) {
 					const isActive = localConfig[key] === true;
 					el.classList.toggle('active', isActive);
 					el.setAttribute('aria-checked', isActive.toString());

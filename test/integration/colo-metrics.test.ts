@@ -2,15 +2,17 @@
 
 import { evictDurableObject, runInDurableObject } from "cloudflare:test";
 import { env } from "cloudflare:workers";
-import { setupNetwork } from "@msw/cloudflare";
-import { HttpResponse, http } from "msw";
-import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
-import { z } from "zod";
-import { CLOUDFLARE_GQL_URL } from "../../src/cloudflare/client";
-import type { MetricExporter } from "../../src/durable-objects/MetricExporter";
+import { describe, expect, it } from "vitest";
+import {
+	createPaidZone,
+	expectSuccessfulRefresh,
+	initializeMetricExporter,
+	mockBatchedZoneGroups,
+	setupGraphQLNetwork,
+} from "./metric-exporter-helpers";
 import { COLO_METRIC_SCENARIOS, type ColoMetricScenario } from "./scenarios";
 
-const network = setupNetwork();
+const network = setupGraphQLNetwork();
 
 function createColoGroups(scenario: ColoMetricScenario) {
 	const { colosPerZone, hostsPerColo, trafficPerHost } = scenario.scale;
@@ -29,94 +31,108 @@ function createColoGroups(scenario: ColoMetricScenario) {
 	).flat();
 }
 
-beforeAll(() => network.enable());
-afterEach(() => network.resetHandlers());
-afterAll(() => network.disable());
-
 describe("colo-metrics Durable Object", () => {
-	it.each(COLO_METRIC_SCENARIOS)("$path $name", async (scenario) => {
+	it.each(COLO_METRIC_SCENARIOS)("$name", async (scenario) => {
 		const accountId = scenario.name.replaceAll(" ", "-");
-		const zones = Array.from({ length: scenario.scale.zones }, (_, index) => ({
-			id: `${accountId}-zone-${index}`,
-			name: `${accountId}-zone-${index}.example.com`,
-			status: "active",
-			plan: { id: "paid", name: "Paid" },
-			account: { id: accountId, name: accountId },
-		}));
+		const zones = Array.from({ length: scenario.scale.zones }, (_, index) =>
+			createPaidZone(accountId, `${accountId}-zone-${index}`),
+		);
 		const groups = createColoGroups(scenario);
-		let graphQLRequests = 0;
-		network.use(
-			http.post(CLOUDFLARE_GQL_URL, async ({ request }) => {
-				graphQLRequests++;
-				const body = z
-					.object({ variables: z.object({ zoneIDs: z.array(z.string()) }) })
-					.parse(await request.json());
-				const requestedZones = new Set(body.variables.zoneIDs);
-				return HttpResponse.json({
-					data: {
-						viewer: {
-							zones: zones
-								.filter((zone) => requestedZones.has(zone.id))
-								.map((zone) => ({
-									zoneTag: zone.id,
-									httpRequestsAdaptiveGroups: groups,
-								})),
-						},
-					},
-				});
-			}),
-		);
-		const exporterId = `account:${accountId}:${scenario.path.metric}`;
-		const stub = env.MetricExporter.getByName(exporterId);
-		await stub.initialize(exporterId);
-		await stub.updateZoneContext(
-			accountId,
-			accountId,
+		const graphQLRequests = mockBatchedZoneGroups(
+			network,
 			zones,
-			{},
-			{
-				mintime: "2026-01-01T00:00:00.000Z",
-				maxtime: "2026-01-01T00:01:00.000Z",
-			},
+			"httpRequestsAdaptiveGroups",
+			groups,
 		);
-
-		const lastError = await runInDurableObject(
-			stub,
-			async (_instance: MetricExporter, state) => {
-				const stored = await state.storage.get<{ lastError: string | null }>(
-					"state",
-				);
-				return stored?.lastError;
-			},
+		const exporter = await initializeMetricExporter(
+			accountId,
+			"colo-metrics",
+			zones,
 		);
-		expect(lastError).toBeNull();
-		expect(graphQLRequests).toBe(Math.ceil(scenario.scale.zones / 10));
+		const snapshot = await expectSuccessfulRefresh(exporter);
 
-		await evictDurableObject(stub);
-		const snapshot = await stub.exportPackedColoMetrics();
+		expect(graphQLRequests()).toBe(Math.ceil(scenario.scale.zones / 10));
 		const expectedRecords =
 			scenario.scale.zones *
 			scenario.scale.colosPerZone *
 			scenario.scale.hostsPerColo;
 		expect(
-			snapshot?.zones.reduce((total, zone) => total + zone.colo.length, 0),
+			snapshot.zones.reduce(
+				(total, zone) => total + (zone.families[0]?.values.length ?? 0),
+				0,
+			),
 		).toBe(expectedRecords);
-		for (const zone of snapshot?.zones ?? []) {
+		for (const zone of snapshot.zones) {
+			const valuesByName = new Map(
+				zone.families.map((table) => [
+					snapshot.families[table.family]?.name,
+					table.values,
+				]),
+			);
 			expect(
-				zone.visits.every(
-					(value) => value === scenario.scale.trafficPerHost.visits,
-				),
+				valuesByName
+					.get("cloudflare_zone_colocation_visits_total")
+					?.every((value) => value === scenario.scale.trafficPerHost.visits),
 			).toBe(true);
 			expect(
-				zone.edgeResponseBytes.every(
-					(value) => value === scenario.scale.trafficPerHost.responseBytes,
-				),
+				valuesByName
+					.get("cloudflare_zone_colocation_edge_response_bytes_total")
+					?.every(
+						(value) => value === scenario.scale.trafficPerHost.responseBytes,
+					),
 			).toBe(true);
 			expect(
-				zone.requests.every(
-					(value) => value === scenario.scale.trafficPerHost.requests,
-				),
+				valuesByName
+					.get("cloudflare_zone_colocation_requests_total")
+					?.every((value) => value === scenario.scale.trafficPerHost.requests),
 			).toBe(true);
+		}
+
+		if (expectedRecords >= 150_000) {
+			const accountCoordinator = env.AccountMetricCoordinator.getByName(
+				`account:${accountId}`,
+			);
+			await accountCoordinator.initialize(accountId, accountId);
+			await runInDurableObject(accountCoordinator, async (_instance, state) => {
+				await state.storage.put("state", {
+					accountId,
+					accountName: accountId,
+					zones,
+					totalZoneCount: zones.length,
+					firewallRules: {},
+					lastZoneFetch: Date.now(),
+					lastRefresh: Date.now(),
+				});
+			});
+			await evictDurableObject(accountCoordinator);
+			const metricCoordinator = env.MetricCoordinator.getByName(
+				`stream-test:${accountId}`,
+			);
+			await metricCoordinator.setIdentifier(`stream-test:${accountId}`);
+			await runInDurableObject(metricCoordinator, async (_instance, state) => {
+				await state.storage.put("state", {
+					identifier: `stream-test:${accountId}`,
+					accounts: [{ id: accountId, name: accountId }],
+					lastAccountFetch: Date.now(),
+				});
+			});
+			await evictDurableObject(metricCoordinator);
+			const response = await metricCoordinator.fetch(
+				new Request("https://test/export"),
+			);
+			expect(response.status).toBe(200);
+			const reader = response.body?.getReader();
+			if (reader === undefined) throw new Error("missing Prometheus stream");
+			let streamedBytes = 0;
+			let largestChunk = 0;
+			while (true) {
+				const next = await reader.read();
+				if (next.done) break;
+				streamedBytes += next.value.byteLength;
+				largestChunk = Math.max(largestChunk, next.value.byteLength);
+			}
+			expect(streamedBytes).toBeGreaterThan(32 * 1024 * 1024);
+			expect(largestChunk).toBeLessThan(64 * 1024);
 		}
 	});
 });

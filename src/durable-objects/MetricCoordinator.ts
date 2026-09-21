@@ -4,14 +4,102 @@ import { extractErrorInfo } from "../lib/errors";
 import { filterAccountsByIds, parseCommaSeparated } from "../lib/filters";
 import { createLogger, type Logger } from "../lib/logger";
 import type { MetricDefinition } from "../lib/metrics";
-import { serializePackedColoMetrics } from "../lib/packed-colo-prometheus";
-import type { PackedColoMetricState } from "../lib/packed-colo-state";
-import { serializeToPrometheus } from "../lib/prometheus";
+import { PACKED_METRIC_QUERIES } from "../lib/packed-metric-state";
+import {
+	createPrometheusStream,
+	serializeToPrometheus,
+} from "../lib/prometheus";
 import { getConfig, type ResolvedConfig } from "../lib/runtime-config";
 import type { Account } from "../lib/types";
 import { AccountMetricCoordinator } from "./AccountMetricCoordinator";
 
 const STATE_KEY = "state";
+const PROMETHEUS_CHUNK_CHARS = 16 * 1024;
+
+function zoneCount(response: Response, name: string): number {
+	const header = response.headers.get(name);
+	if (header === null) {
+		throw new Error(`Missing account metric stream header: ${name}`);
+	}
+	const value = Number(header);
+	if (!Number.isInteger(value) || value < 0) {
+		throw new Error(`Invalid account metric stream header: ${name}`);
+	}
+	return value;
+}
+
+async function* deduplicateMetricMetadata(
+	body: ReadableStream<Uint8Array>,
+	emitted: Set<string>,
+	logger: Logger,
+): AsyncGenerator<string, void> {
+	const reader = body.getReader();
+	const decoder = new TextDecoder();
+	let pending = "";
+	let buffer = "";
+	let completed = false;
+	const metadataKey = (line: string) => {
+		const metadata = /^# (HELP|TYPE) (\S+)/.exec(line);
+		return metadata === null ? undefined : `${metadata[1]}:${metadata[2]}`;
+	};
+	try {
+		while (true) {
+			const next = await reader.read();
+			if (next.done) {
+				completed = true;
+				break;
+			}
+			pending += decoder.decode(next.value, { stream: true });
+			let lineEnd = pending.indexOf("\n");
+			while (lineEnd >= 0) {
+				const line = pending.slice(0, lineEnd + 1);
+				pending = pending.slice(lineEnd + 1);
+				const key = metadataKey(line);
+				if (key !== undefined) {
+					if (buffer.length > 0) yield buffer;
+					buffer = "";
+					if (!emitted.has(key)) {
+						emitted.add(key);
+						yield line;
+					}
+				} else {
+					buffer += line;
+					if (buffer.length >= PROMETHEUS_CHUNK_CHARS) {
+						yield buffer;
+						buffer = "";
+					}
+				}
+				lineEnd = pending.indexOf("\n");
+			}
+		}
+		pending += decoder.decode();
+		if (pending.length > 0) {
+			const key = metadataKey(pending);
+			if (key === undefined) buffer += pending;
+			else if (!emitted.has(key)) {
+				if (buffer.length > 0) yield buffer;
+				buffer = "";
+				emitted.add(key);
+				yield pending;
+			}
+		}
+		if (buffer.length > 0) yield buffer;
+	} finally {
+		try {
+			if (!completed) {
+				try {
+					await reader.cancel();
+				} catch (error) {
+					logger.debug("Failed to cancel streamed account metrics", {
+						error: error instanceof Error ? error.message : String(error),
+					});
+				}
+			}
+		} finally {
+			reader.releaseLock();
+		}
+	}
+}
 
 type MetricCoordinatorState = {
 	identifier: string;
@@ -180,22 +268,7 @@ export class MetricCoordinator extends DurableObject<Env> {
 		config: ResolvedConfig,
 		logger: Logger,
 	): ReadableStream<Uint8Array> {
-		const encoder = new TextEncoder();
-		const chunks = this.exportChunks(accounts, config, logger);
-		return new ReadableStream({
-			async pull(controller) {
-				try {
-					const next = await chunks.next();
-					if (next.done) controller.close();
-					else controller.enqueue(encoder.encode(next.value));
-				} catch (error) {
-					controller.error(error);
-				}
-			},
-			async cancel() {
-				await chunks.return();
-			},
-		});
+		return createPrometheusStream(this.exportChunks(accounts, config, logger));
 	}
 
 	private async *exportChunks(
@@ -205,6 +278,9 @@ export class MetricCoordinator extends DurableObject<Env> {
 	): AsyncGenerator<string, void> {
 		const metricsDenylist = parseCommaSeparated(config.metricsDenylist);
 		const excludeLabels = config.excludeHost ? new Set(["host"]) : undefined;
+		const packedMetricQueries = config.packedMetricStorage
+			? PACKED_METRIC_QUERIES
+			: [];
 
 		const errorsByAccount: Map<string, { code: string; count: number }[]> =
 			new Map();
@@ -214,8 +290,10 @@ export class MetricCoordinator extends DurableObject<Env> {
 			processed: 0,
 			skippedFreeTier: 0,
 		};
-		const allMetrics: MetricDefinition[] = [];
-		const packedColoMetrics: PackedColoMetricState[] = [];
+		const accountStreams: {
+			account: Account;
+			response: Response;
+		}[] = [];
 
 		for (const account of accounts) {
 			try {
@@ -225,16 +303,21 @@ export class MetricCoordinator extends DurableObject<Env> {
 					this.env,
 				);
 				// Resolve the storage mode once per scrape so every account serializes
-				// colo metrics the same way; mixed modes would duplicate HELP/TYPE lines.
-				const result = await coordinator.exportForPrometheus({
-					packedColoStorage: config.coloMetricsPackedStorage,
+				// packed metrics the same way; mixed modes would duplicate HELP/TYPE lines.
+				const response = await coordinator.exportForPrometheus({
+					packedMetricQueries,
 				});
-				allMetrics.push(...result.metrics);
-				packedColoMetrics.push(...result.packedColoMetrics);
-				zoneCounts.total += result.zoneCounts.total;
-				zoneCounts.filtered += result.zoneCounts.filtered;
-				zoneCounts.processed += result.zoneCounts.processed;
-				zoneCounts.skippedFreeTier += result.zoneCounts.skippedFreeTier;
+				accountStreams.push({ account, response });
+				zoneCounts.total += zoneCount(response, "X-Metrics-Zones-Total");
+				zoneCounts.filtered += zoneCount(response, "X-Metrics-Zones-Filtered");
+				zoneCounts.processed += zoneCount(
+					response,
+					"X-Metrics-Zones-Processed",
+				);
+				zoneCounts.skippedFreeTier += zoneCount(
+					response,
+					"X-Metrics-Zones-Skipped-Free-Tier",
+				);
 			} catch (error) {
 				const info = extractErrorInfo(error);
 				logger.error("Failed to export account", {
@@ -255,25 +338,48 @@ export class MetricCoordinator extends DurableObject<Env> {
 			}
 		}
 
-		yield* serializePackedColoMetrics(packedColoMetrics, {
-			denylist: metricsDenylist,
-			excludeLabels,
-		});
-		const remaining = serializeToPrometheus(
-			[
-				...this.buildExporterInfoMetrics(
+		try {
+			const remaining = serializeToPrometheus(
+				this.buildExporterInfoMetrics(
 					accounts.length,
 					zoneCounts,
 					errorsByAccount,
 				),
-				...allMetrics,
-			],
-			{
-				denylist: metricsDenylist,
-				excludeLabels,
-			},
-		);
-		if (remaining.length > 0) yield `${remaining}\n`;
+				{
+					denylist: metricsDenylist,
+					excludeLabels,
+				},
+			);
+			if (remaining.length > 0) yield `${remaining}\n`;
+			const emittedMetadata = new Set<string>();
+			for (const { account, response } of accountStreams) {
+				if (response.body === null) continue;
+				try {
+					yield* deduplicateMetricMetadata(
+						response.body,
+						emittedMetadata,
+						logger,
+					);
+				} catch (error) {
+					logger.error("Failed to stream account metrics", {
+						account_id: account.id,
+						error: error instanceof Error ? error.message : String(error),
+					});
+				}
+			}
+		} finally {
+			for (const { account, response } of accountStreams) {
+				if (response.body === null || response.body.locked) continue;
+				try {
+					await response.body.cancel();
+				} catch (error) {
+					logger.debug("Failed to cancel account metric stream", {
+						account_id: account.id,
+						error: error instanceof Error ? error.message : String(error),
+					});
+				}
+			}
+		}
 		logger.info("Metrics streamed successfully");
 	}
 
