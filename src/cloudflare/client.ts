@@ -23,6 +23,7 @@ import type {
 	Zone,
 } from "../lib/types";
 import { LoadBalancerPoolSchema } from "../lib/types";
+import type { ResultOf } from "./gql/client";
 import {
 	AdaptiveMetricsQuery,
 	CacheMissMetricsQuery,
@@ -34,6 +35,7 @@ import {
 	HostnameHttpMetricsQuery,
 	HTTPMetricsQuery,
 	HTTPMetricsQueryNoBots,
+	LoadBalancerMetricsPackedStorageQuery,
 	LoadBalancerMetricsQuery,
 	LogpushAccountMetricsQuery,
 	LogpushZoneMetricsQuery,
@@ -75,6 +77,25 @@ function graphQLQueryError(query: string, error: CombinedError): GraphQLError {
 		error.graphQLErrors ?? [],
 		{ context: { query } },
 	);
+}
+
+type LoadBalancerZone = NonNullable<
+	ResultOf<typeof LoadBalancerMetricsQuery>["viewer"]
+>["zones"][number];
+type PackedLoadBalancerZone = NonNullable<
+	ResultOf<typeof LoadBalancerMetricsPackedStorageQuery>["viewer"]
+>["zones"][number];
+
+/**
+ * Tells apart zones from the packed and unpacked load balancer queries.
+ *
+ * @param zone Zone from either load balancer query.
+ * @returns True when the zone came from the packed storage query.
+ */
+function isPackedLoadBalancerZone(
+	zone: LoadBalancerZone | PackedLoadBalancerZone,
+): zone is PackedLoadBalancerZone {
+	return "poolRequests" in zone;
 }
 
 /**
@@ -2990,20 +3011,28 @@ export class CloudflareMetricsClient {
 		packedMetricStorage: boolean,
 		observationSink?: ColumnarObservationSink,
 	): Promise<MetricDefinition[]> {
-		const result = await this.gql.query(LoadBalancerMetricsQuery, {
+		const variables = {
 			zoneIDs: zoneIds,
 			mintime: timeRange.mintime,
 			maxtime: timeRange.maxtime,
 			limit: this.config.queryLimit,
-			packed: packedMetricStorage,
-		});
-
-		if (result.error) {
-			throw new GraphQLError(
-				"Failed to fetch load balancer metrics",
-				result.error.graphQLErrors ?? [],
-				{ context: { zone_ids: zoneIds } },
+		};
+		let zonesData: ReadonlyArray<LoadBalancerZone | PackedLoadBalancerZone>;
+		if (packedMetricStorage) {
+			const result = await this.gql.query(
+				LoadBalancerMetricsPackedStorageQuery,
+				variables,
 			);
+			if (result.error) {
+				throw graphQLQueryError("load-balancer-metrics", result.error);
+			}
+			zonesData = result.data?.viewer?.zones ?? [];
+		} else {
+			const result = await this.gql.query(LoadBalancerMetricsQuery, variables);
+			if (result.error) {
+				throw graphQLQueryError("load-balancer-metrics", result.error);
+			}
+			zonesData = result.data?.viewer?.zones ?? [];
 		}
 
 		const poolHealth: MetricDefinition = {
@@ -3047,11 +3076,15 @@ export class CloudflareMetricsClient {
 		// Track seen policies to dedupe info metric
 		const seenPolicies = new Set<string>();
 
-		for (const zoneData of result.data?.viewer?.zones ?? []) {
+		for (const zoneData of zonesData) {
 			const zoneName = findZoneName(zoneData.zoneTag, zones);
+			const packed = isPackedLoadBalancerZone(zoneData) ? zoneData : undefined;
+			const unpacked = isPackedLoadBalancerZone(zoneData)
+				? undefined
+				: zoneData;
 
 			// Pool requests, RTT, steering policy, origins selected from groups
-			for (const group of zoneData.loadBalancingRequestsAdaptiveGroups ?? []) {
+			for (const group of unpacked?.loadBalancingRequestsAdaptiveGroups ?? []) {
 				const dim = group.dimensions;
 				if (group.count != null && group.count > 0) {
 					poolRequests.values.push({
@@ -3107,7 +3140,7 @@ export class CloudflareMetricsClient {
 				}
 			}
 
-			for (const group of zoneData.poolRequests ?? []) {
+			for (const group of packed?.poolRequests ?? []) {
 				const dim = group.dimensions;
 				if (group.count != null && group.count > 0) {
 					poolRequests.values.push({
@@ -3122,7 +3155,7 @@ export class CloudflareMetricsClient {
 				}
 			}
 
-			for (const group of zoneData.poolRtt ?? []) {
+			for (const group of packed?.poolRtt ?? []) {
 				const dim = group.dimensions;
 				if (
 					group.count != null &&
@@ -3141,7 +3174,7 @@ export class CloudflareMetricsClient {
 				}
 			}
 
-			for (const group of zoneData.originsSelected ?? []) {
+			for (const group of packed?.originsSelected ?? []) {
 				const dim = group.dimensions;
 				if (
 					group.count != null &&
@@ -3159,7 +3192,7 @@ export class CloudflareMetricsClient {
 				}
 			}
 
-			for (const group of zoneData.steeringPolicies ?? []) {
+			for (const group of packed?.steeringPolicies ?? []) {
 				const dim = group.dimensions;
 				const lbName = dim?.lbName ?? "";
 				const policyKey = `${zoneName}\x00${lbName}`;
