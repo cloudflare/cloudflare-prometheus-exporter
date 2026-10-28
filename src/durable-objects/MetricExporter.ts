@@ -335,8 +335,12 @@ export class MetricExporter extends DurableObject<Env> {
 			return;
 		}
 
+		// Never refreshed and nothing scheduled: start collection now. Covers the
+		// first context push and exporters persisted before this check existed
+		// (accountId already set, lastRefresh still 0, no alarm). A pending alarm
+		// means a retry/backoff is already scheduled, so leave it alone.
 		const isFirstContext =
-			state.zones.length === 0 && zones.length > 0 && state.lastRefresh === 0;
+			state.lastRefresh === 0 && (await this.ctx.storage.getAlarm()) === null;
 
 		const updatedState: MetricExporterState = {
 			...state,
@@ -455,9 +459,11 @@ export class MetricExporter extends DurableObject<Env> {
 		const usePackedStorage =
 			isPackedMetricQuery(state.queryName) && config.packedMetricStorage;
 
-		// Skip if zone context not yet pushed (account-scoped needs zones)
-		if (state.scopeType === "account" && state.zones.length === 0) {
-			logger.info("Skipping refresh - no zone context yet");
+		// Skip if account context not yet pushed. Checks accountId rather than
+		// zones.length so account-level-only queries (e.g. magic-transit) still
+		// run for accounts with zero zones.
+		if (state.scopeType === "account" && state.accountId === "") {
+			logger.info("Skipping refresh - no account context yet");
 			await this.scheduleNextAlarm(config);
 			return;
 		}
