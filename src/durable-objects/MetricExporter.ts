@@ -231,9 +231,12 @@ export class MetricExporter extends DurableObject<Env> {
 			return;
 		}
 
-		// accountId === "" means this is genuinely the first context push, as
-		// opposed to a legitimate zero-zone account (e.g. Magic Transit-only).
-		const isFirstContext = state.accountId === "" && state.lastRefresh === 0;
+		// Never refreshed and nothing scheduled: start collection now. Covers the
+		// first context push and exporters persisted before this check existed
+		// (accountId already set, lastRefresh still 0, no alarm). A pending alarm
+		// means a retry/backoff is already scheduled, so leave it alone.
+		const isFirstContext =
+			state.lastRefresh === 0 && (await this.ctx.storage.getAlarm()) === null;
 
 		const updatedState: MetricExporterState = {
 			...state,

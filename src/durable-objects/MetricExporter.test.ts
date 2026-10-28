@@ -3,6 +3,9 @@ import { MetricExporter } from "./MetricExporter";
 
 class AlarmStorage {
 	readonly setAlarm = vi.fn().mockResolvedValue(undefined);
+	readonly getAlarm = vi
+		.fn<() => Promise<number | null>>()
+		.mockResolvedValue(null);
 	getManyFailures = 0;
 	readonly values = new Map<string, unknown>();
 
@@ -215,5 +218,45 @@ describe("MetricExporter state recovery", () => {
 		await exporter.initialize("account:account-id:worker-totals");
 
 		await expect(exporter.export()).resolves.toEqual([]);
+	});
+
+	describe("updateZoneContext initial refresh", () => {
+		const timeRange = {
+			mintime: "2026-01-01T00:00:00Z",
+			maxtime: "2026-01-01T00:01:00Z",
+		};
+
+		async function pushContext(pendingAlarm: number | null) {
+			const storage = new AlarmStorage();
+			storage.getAlarm.mockResolvedValue(pendingAlarm);
+			// Pre-patch zero-zone exporter: accountId populated, never refreshed.
+			storage.values.set("state", storedState());
+			const { exporter, ready } = createExporter(storage, {
+				CONFIG_KV: { get: vi.fn().mockResolvedValue(null) },
+			});
+			await ready;
+			const refresh = vi
+				.spyOn(
+					exporter as unknown as { refreshWithTimeRange: () => Promise<void> },
+					"refreshWithTimeRange",
+				)
+				.mockResolvedValue(undefined);
+			await exporter.updateZoneContext(
+				"account-id",
+				"Account",
+				[],
+				{},
+				timeRange,
+			);
+			return refresh;
+		}
+
+		it("starts collection for a never-refreshed exporter with no alarm", async () => {
+			expect(await pushContext(null)).toHaveBeenCalledOnce();
+		});
+
+		it("leaves a scheduled retry/backoff alarm alone", async () => {
+			expect(await pushContext(Date.now() + 60_000)).not.toHaveBeenCalled();
+		});
 	});
 });
