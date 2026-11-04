@@ -449,7 +449,6 @@ export const LoadBalancerMetricsQuery = graphql(`
     $mintime: Time!
     $maxtime: Time!
     $limit: uint64!
-    $packed: Boolean!
   ) {
     viewer {
       zones(filter: { zoneTag_in: $zoneIDs }) {
@@ -457,7 +456,7 @@ export const LoadBalancerMetricsQuery = graphql(`
         loadBalancingRequestsAdaptiveGroups(
           filter: { datetime_geq: $mintime, datetime_lt: $maxtime }
           limit: $limit
-        ) @skip(if: $packed) {
+        ) {
           count
           dimensions {
             lbName
@@ -471,10 +470,40 @@ export const LoadBalancerMetricsQuery = graphql(`
             numberOriginsSelected
           }
         }
+        loadBalancingRequestsAdaptive(
+          filter: { datetime_geq: $mintime, datetime_lt: $maxtime }
+          limit: $limit
+        ) {
+          lbName
+          pools {
+            id
+            poolName
+            healthy
+            healthCheckEnabled
+            avgRttMs
+          }
+        }
+      }
+    }
+  }
+`);
+
+// The Cloudflare GraphQL API does not support directives, so packed storage uses a
+// separate query with one alias per metric family.
+export const LoadBalancerMetricsPackedStorageQuery = graphql(`
+  query LoadBalancerMetricsPackedStorage(
+    $zoneIDs: [string!]
+    $mintime: Time!
+    $maxtime: Time!
+    $limit: uint64!
+  ) {
+    viewer {
+      zones(filter: { zoneTag_in: $zoneIDs }) {
+        zoneTag
         poolRequests: loadBalancingRequestsAdaptiveGroups(
           filter: { datetime_geq: $mintime, datetime_lt: $maxtime }
           limit: $limit
-        ) @include(if: $packed) {
+        ) {
           count
           dimensions {
             lbName
@@ -485,7 +514,7 @@ export const LoadBalancerMetricsQuery = graphql(`
         poolRtt: loadBalancingRequestsAdaptiveGroups(
           filter: { datetime_geq: $mintime, datetime_lt: $maxtime }
           limit: $limit
-        ) @include(if: $packed) {
+        ) {
           count
           dimensions {
             lbName
@@ -496,7 +525,7 @@ export const LoadBalancerMetricsQuery = graphql(`
         originsSelected: loadBalancingRequestsAdaptiveGroups(
           filter: { datetime_geq: $mintime, datetime_lt: $maxtime }
           limit: $limit
-        ) @include(if: $packed) {
+        ) {
           count
           dimensions {
             lbName
@@ -507,7 +536,7 @@ export const LoadBalancerMetricsQuery = graphql(`
         steeringPolicies: loadBalancingRequestsAdaptiveGroups(
           filter: { datetime_geq: $mintime, datetime_lt: $maxtime }
           limit: $limit
-        ) @include(if: $packed) {
+        ) {
           count
           dimensions {
             lbName

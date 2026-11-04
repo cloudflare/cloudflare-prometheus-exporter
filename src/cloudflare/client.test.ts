@@ -4,6 +4,16 @@ import { z } from "zod";
 import { ErrorCode } from "../lib/errors";
 import { CloudflareMetricsClient } from "./client";
 
+function queryDirectives(query: string): string[] {
+	const directives: string[] = [];
+	visit(parse(query), {
+		Directive(node) {
+			directives.push(node.name.value);
+		},
+	});
+	return directives;
+}
+
 function createClient(fetch: typeof globalThis.fetch): CloudflareMetricsClient {
 	return new CloudflareMetricsClient({
 		apiToken: "test-token",
@@ -83,9 +93,10 @@ describe("CloudflareMetricsClient", () => {
 	it("parses the legacy load-balancer response when packed storage is disabled", async () => {
 		const client = createClient(async (input, init) => {
 			const body = z
-				.object({ variables: z.object({ packed: z.boolean() }) })
+				.object({ query: z.string(), variables: z.record(z.string(), z.unknown()) })
 				.parse(await new Request(input, init).json());
-			expect(body.variables.packed).toBe(false);
+			expect(queryDirectives(body.query)).toEqual([]);
+			expect(body.variables).not.toHaveProperty("packed");
 			return Response.json({
 				data: {
 					viewer: {
@@ -134,6 +145,102 @@ describe("CloudflareMetricsClient", () => {
 			"cloudflare_zone_lb_pool_rtt_seconds",
 			"cloudflare_zone_lb_steering_policy_info",
 			"cloudflare_zone_lb_origins_selected_count",
+		]);
+	});
+
+	it("parses the aliased load-balancer response when packed storage is enabled", async () => {
+		const client = createClient(async (input, init) => {
+			const body = z
+				.object({ query: z.string(), variables: z.record(z.string(), z.unknown()) })
+				.parse(await new Request(input, init).json());
+			// The Cloudflare GraphQL API rejects directives ("directives not supported").
+			expect(queryDirectives(body.query)).toEqual([]);
+			expect(body.variables).not.toHaveProperty("packed");
+			return Response.json({
+				data: {
+					viewer: {
+						zones: [
+							{
+								zoneTag: "zone-id",
+								poolRequests: [
+									{
+										count: 7,
+										dimensions: {
+											lbName: "lb",
+											selectedPoolName: "pool",
+											selectedOriginName: "origin",
+										},
+									},
+								],
+								poolRtt: [
+									{
+										count: 7,
+										dimensions: {
+											lbName: "lb",
+											selectedPoolName: "pool",
+											selectedPoolAvgRttMs: 250,
+										},
+									},
+								],
+								originsSelected: [
+									{
+										count: 7,
+										dimensions: {
+											lbName: "lb",
+											selectedPoolName: "pool",
+											numberOriginsSelected: 2,
+										},
+									},
+								],
+								steeringPolicies: [
+									{
+										count: 7,
+										dimensions: { lbName: "lb", steeringPolicy: "dynamic_latency" },
+									},
+								],
+								loadBalancingRequestsAdaptive: [],
+							},
+						],
+					},
+				},
+			});
+		});
+
+		const metrics = await client.getZoneMetrics(
+			"load-balancer-metrics",
+			["zone-id"],
+			[
+				{
+					id: "zone-id",
+					name: "example.com",
+					status: "active",
+					plan: { id: "paid", name: "Paid" },
+					account: { id: "account-id", name: "Account" },
+				},
+			],
+			{},
+			{ mintime: "2026-01-01T00:00:00Z", maxtime: "2026-01-01T00:01:00Z" },
+			undefined,
+			undefined,
+			false,
+			true,
+		);
+
+		expect(metrics.map((metric) => metric.name)).toEqual([
+			"cloudflare_zone_pool_requests_total",
+			"cloudflare_zone_lb_pool_rtt_seconds",
+			"cloudflare_zone_lb_steering_policy_info",
+			"cloudflare_zone_lb_origins_selected_count",
+		]);
+		expect(
+			metrics.find(
+				(metric) => metric.name === "cloudflare_zone_lb_pool_rtt_seconds",
+			)?.values,
+		).toEqual([
+			{
+				labels: { zone: "example.com", lb_name: "lb", pool_name: "pool" },
+				value: 0.25,
+			},
 		]);
 	});
 
