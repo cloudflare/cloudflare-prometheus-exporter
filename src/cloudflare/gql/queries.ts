@@ -1052,3 +1052,28 @@ export const StreamLiveInputsQuery = graphql(`
     }
   }
 `);
+
+export const TurnstileMetricsQuery = graphql(`
+  query TurnstileMetrics(
+    $accountID: string!
+    $limit: uint64!
+    $filter: AccountTurnstileAdaptiveGroupsFilter_InputObject!
+  ) {
+    viewer {
+      accounts(filter: { accountTag: $accountID }) {
+        turnstileAdaptiveGroups(
+          limit: $limit
+          filter: $filter
+          orderBy: [siteKey_ASC, action_ASC, eventType_ASC]
+        ) {
+          count
+          dimensions {
+            siteKey
+            action
+            eventType
+          }
+        }
+      }
+    }
+  }
+`);

@@ -8,7 +8,7 @@ Export Cloudflare metrics to Prometheus. Built on Cloudflare Workers with Durabl
 
 ## Features
 
-- **90+ Prometheus metrics** - requests, bandwidth, threats, workers, load balancers, SSL certs, hostname-level analytics, network analytics, Magic Transit tunnel health/traffic/SLO, Magic Firewall per-rule visibility, stream video/live, and more
+- **90+ Prometheus metrics** - requests, bandwidth, threats, workers, load balancers, SSL certs, hostname-level analytics, network analytics, Magic Transit tunnel health/traffic/SLO, Magic Firewall per-rule visibility, Turnstile events, stream video/live, and more
 - **Cloudflare Workers** - serverless edge deployment
 - **Durable Objects** - stateful counter accumulation for proper Prometheus semantics
 - **Background refresh** - alarms fetch data every 60s; scrapes return cached data instantly
@@ -266,6 +266,42 @@ curl -X DELETE https://your-worker.workers.dev/config
 |--------|------|--------|
 | `cloudflare_zone_firewall_events_total` | counter | zone, action, source, rule, host, country |
 | `cloudflare_zone_firewall_bots_detected_total` | counter | zone, bot_score, detection_source |
+
+### Turnstile Metrics
+
+| Metric | Type | Labels |
+|--------|------|--------|
+| `cloudflare_turnstile_events_total` | counter | account, site_key, action, event_type |
+
+The `turnstile` collector queries the account-level `turnstileAdaptiveGroups` dataset.
+It also runs for Free accounts and accounts without zones.
+The API token needs **Account > Account Analytics > Read** permission for the account.
+
+Each series counts one event type for a widget and action.
+Empty action values remain empty. The collector preserves new event types without an exporter update.
+The existing refresh process adds each window's counts to persistent counters.
+Scrapes return cached counters and do not add counts.
+The collector fetches all result pages before it updates counters.
+`QUERY_LIMIT` sets the maximum groups per API request, not the total number of exported series.
+Each extra page requires another API request. If any page fails, the refresh retains the previous counters.
+
+Cloudflare labels this dataset beta and uses adaptive sampling. Counts can therefore be estimates.
+The configured scrape delay also applies to these metrics.
+Challenge solves and successful Siteverify validations are separate events. Neither is an application block count.
+Use bounded action values to limit the number of series.
+
+For example, query the event rate per widget:
+
+```promql
+sum by (account, site_key, event_type) (
+  rate(cloudflare_turnstile_events_total[5m])
+)
+```
+
+References: [Turnstile Analytics](https://developers.cloudflare.com/turnstile/turnstile-analytics/),
+[GraphQL dataset catalogue](https://developers.cloudflare.com/data-localization/metadata-boundary/graphql-datasets/),
+[adaptive sampling](https://developers.cloudflare.com/analytics/graphql-api/sampling/),
+[GraphQL pagination](https://developers.cloudflare.com/analytics/graphql-api/features/pagination/).
 
 ### Health Check Metrics
 
@@ -546,14 +582,15 @@ For mixed accounts (enterprise + free zones), only free zones are skipped—paid
 │   ▼            ▼      ▼            ▼      ▼            ▼                       │
 │ ┌─────┐    ┌─────┐  ┌─────┐    ┌─────┐  ┌─────┐    ┌─────┐                     │
 │ │Exprt│    │Exprt│  │Exprt│    │Exprt│  │Exprt│    │Exprt│                     │
-│ │(21) │ .. │(N)  │  │(21) │ .. │(N)  │  │(21) │ .. │(N)  │                     │
+│ │(23) │ .. │(N)  │  │(23) │ .. │(N)  │  │(23) │ .. │(N)  │                     │
 │ │acct │    │zone │  │acct │    │zone │  │acct │    │zone │                     │
 │ └─────┘    └─────┘  └─────┘    └─────┘  └─────┘    └─────┘                     │
 │                                                                                │
 │  MetricExporter DOs (per account):                                             │
-│  - Account-scoped (21): worker-totals, logpush-account, magic-transit,         │
+│  - Account-scoped (23): worker-totals, logpush-account, magic-transit,         │
 │    magic-transit-slo, magic-transit-traffic, magic-firewall-samples,           │
 │    network-analytics, stream-video-playback, stream-live-inputs,              │
+│    images, turnstile,                                                        │
 │    http-metrics, adaptive-metrics, edge-country-metrics,                      │
 │    colo-metrics, colo-error-metrics, request-method-metrics,                   │
 │    health-check-metrics, load-balancer-metrics, logpush-zone,                  │
@@ -605,7 +642,7 @@ For mixed accounts (enterprise + free zones), only free zones are skipped—paid
   ▼           ▼         ▼           ▼         ▼           ▼
 ┌─────┐   ┌─────┐    ┌─────┐   ┌─────┐    ┌─────┐   ┌─────┐
 │Exprt│...│Exprt│    │Exprt│...│Exprt│    │Exprt│...│Exprt│
-│21+N │   │     │    │21+N │   │     │    │21+N │   │     │
+│23+N │   │     │    │23+N │   │     │    │23+N │   │     │
 │     │   │     │    │     │   │     │    │     │   │     │
 │ ret │   │ ret │    │ ret │   │ ret │    │ ret │   │ ret │
 │cache│   │cache│    │cache│   │cache│    │cache│   │cache│
@@ -666,7 +703,7 @@ For mixed accounts (enterprise + free zones), only free zones are skipped—paid
 │                                                                        │
 │  3. Push context to MetricExporter DOs:                                │
 │     ┌────────────────────────────────────────────────────────────────┐ │
-│     │ Account-scoped (21 exporters):                                 │ │
+│     │ Account-scoped (23 exporters):                                 │ │
 │     │   exporter.updateZoneContext(accountId, accountName, zones)    │ │
 │     │                                                                │ │
 │     │ Zone-scoped (N exporters, 1 per zone):                         │ │
@@ -683,8 +720,8 @@ For mixed accounts (enterprise + free zones), only free zones are skipped—paid
 ┌────────────────────────────────────────────────────────────────────────┐
 │           MetricExporter.refresh() for account-scoped queries          │
 │                                                                        │
-│  Query Types (21 total):                                               │
-│  ├── ACCOUNT-LEVEL (single account per query, 9):                      │
+│  Query Types (23 total):                                               │
+│  ├── ACCOUNT-LEVEL (single account per query, 11):                     │
 │  │   ├── worker-totals                                                 │
 │  │   ├── logpush-account                                               │
 │  │   ├── magic-transit                                                 │
@@ -693,7 +730,9 @@ For mixed accounts (enterprise + free zones), only free zones are skipped—paid
 │  │   ├── magic-firewall-samples                                        │
 │  │   ├── network-analytics                                             │
 │  │   ├── stream-video-playback                                         │
-│  │   └── stream-live-inputs                                            │
+│  │   ├── stream-live-inputs                                            │
+│  │   ├── images (REST)                                                 │
+│  │   └── turnstile                                                     │
 │  │                                                                     │
 │  └── ZONE-LEVEL (all zones batched in one query, 12):                  │
 │      ├── http-metrics                                                  │
