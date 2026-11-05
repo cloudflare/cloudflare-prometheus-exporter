@@ -884,12 +884,18 @@ export const CacheMissMetricsQuery = graphql(`
 `);
 
 /**
- * Combined network analytics query across all 6 NAv2 datasets.
- * Returns bits/packets totals with low-cardinality dimensions.
- * Datasets that don't apply to an account return empty arrays.
+ * Per-dataset network analytics queries (one GraphQL query per NAv2 dataset).
+ *
+ * These were previously a single combined query. Cloudflare's GraphQL API
+ * null-bubbles a per-dataset authorization error ("does not have access to the
+ * path") up to the nullable `viewer` field, so if an account is not entitled to
+ * ANY one dataset (e.g. Advanced TCP/DNS Protection), the entire combined
+ * response is nulled and every dataset is lost — including the ones the account
+ * IS entitled to. Querying each dataset independently isolates the denial so
+ * entitled datasets still return data.
  */
-export const NetworkAnalyticsQuery = graphql(`
-  query NetworkAnalytics(
+export const NetworkAnalyticsMagicTransitQuery = graphql(`
+  query NetworkAnalyticsMagicTransit(
     $accountID: string!
     $limit: uint64!
     $mintime: Time!
@@ -912,6 +918,20 @@ export const NetworkAnalyticsQuery = graphql(`
             mitigationSystem
           }
         }
+      }
+    }
+  }
+`);
+
+export const NetworkAnalyticsMagicFirewallQuery = graphql(`
+  query NetworkAnalyticsMagicFirewall(
+    $accountID: string!
+    $limit: uint64!
+    $mintime: Time!
+    $maxtime: Time!
+  ) {
+    viewer {
+      accounts(filter: { accountTag: $accountID }) {
         magicFirewallNetworkAnalyticsAdaptiveGroups(
           limit: $limit
           filter: { datetime_geq: $mintime, datetime_lt: $maxtime }
@@ -926,6 +946,20 @@ export const NetworkAnalyticsQuery = graphql(`
             ipProtocolName
           }
         }
+      }
+    }
+  }
+`);
+
+export const NetworkAnalyticsDosdQuery = graphql(`
+  query NetworkAnalyticsDosd(
+    $accountID: string!
+    $limit: uint64!
+    $mintime: Time!
+    $maxtime: Time!
+  ) {
+    viewer {
+      accounts(filter: { accountTag: $accountID }) {
         dosdNetworkAnalyticsAdaptiveGroups(
           limit: $limit
           filter: { datetime_geq: $mintime, datetime_lt: $maxtime }
@@ -941,6 +975,20 @@ export const NetworkAnalyticsQuery = graphql(`
             attackVector
           }
         }
+      }
+    }
+  }
+`);
+
+export const NetworkAnalyticsIDPSQuery = graphql(`
+  query NetworkAnalyticsIDPS(
+    $accountID: string!
+    $limit: uint64!
+    $mintime: Time!
+    $maxtime: Time!
+  ) {
+    viewer {
+      accounts(filter: { accountTag: $accountID }) {
         magicIDPSNetworkAnalyticsAdaptiveGroups(
           limit: $limit
           filter: { datetime_geq: $mintime, datetime_lt: $maxtime }
@@ -955,6 +1003,20 @@ export const NetworkAnalyticsQuery = graphql(`
             ipProtocolName
           }
         }
+      }
+    }
+  }
+`);
+
+export const NetworkAnalyticsTcpProtectionQuery = graphql(`
+  query NetworkAnalyticsTcpProtection(
+    $accountID: string!
+    $limit: uint64!
+    $mintime: Time!
+    $maxtime: Time!
+  ) {
+    viewer {
+      accounts(filter: { accountTag: $accountID }) {
         advancedTcpProtectionNetworkAnalyticsAdaptiveGroups(
           limit: $limit
           filter: { datetime_geq: $mintime, datetime_lt: $maxtime }
@@ -969,6 +1031,20 @@ export const NetworkAnalyticsQuery = graphql(`
             ipProtocolName
           }
         }
+      }
+    }
+  }
+`);
+
+export const NetworkAnalyticsDnsProtectionQuery = graphql(`
+  query NetworkAnalyticsDnsProtection(
+    $accountID: string!
+    $limit: uint64!
+    $mintime: Time!
+    $maxtime: Time!
+  ) {
+    viewer {
+      accounts(filter: { accountTag: $accountID }) {
         advancedDnsProtectionNetworkAnalyticsAdaptiveGroups(
           limit: $limit
           filter: { datetime_geq: $mintime, datetime_lt: $maxtime }
