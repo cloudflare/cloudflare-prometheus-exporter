@@ -46,6 +46,7 @@ import {
 	RequestMethodMetricsQuery,
 	StreamLiveInputsQuery,
 	StreamVideoPlaybackQuery,
+	TurnstileMetricsQuery,
 	WorkerTotalsQuery,
 } from "./gql/queries";
 import type { AccountLevelQuery, ZoneLevelQuery } from "./queries";
@@ -547,11 +548,60 @@ export class CloudflareMetricsClient {
 				);
 			case "images":
 				return this.getImagesMetrics(accountId, normalizedAccount);
+			case "turnstile":
+				return this.getTurnstileMetrics(
+					accountId,
+					normalizedAccount,
+					timeRange,
+				);
 			default: {
 				const _exhaustive: never = query;
 				throw new Error(`Unknown account metric query: ${_exhaustive}`);
 			}
 		}
+	}
+
+	/** Fetches sampled Turnstile event counts per widget, action, and event type. */
+	private async getTurnstileMetrics(
+		accountId: string,
+		normalizedAccount: string,
+		timeRange: TimeRange,
+	): Promise<MetricDefinition[]> {
+		const result = await this.gql.query(TurnstileMetricsQuery, {
+			accountID: accountId,
+			mintime: timeRange.mintime,
+			maxtime: timeRange.maxtime,
+			limit: this.config.queryLimit,
+		});
+		if (result.error) {
+			throw graphQLQueryError("turnstile", result.error);
+		}
+
+		const events: MetricDefinition = {
+			name: "cloudflare_turnstile_events_total",
+			help: "Turnstile events estimated from adaptive sampling",
+			type: "counter",
+			values: [],
+		};
+
+		for (const accountData of result.data?.viewer?.accounts ?? []) {
+			for (const group of accountData.turnstileAdaptiveGroups ?? []) {
+				const dims = group.dimensions;
+				if (dims == null) continue;
+
+				events.values.push({
+					labels: {
+						account: normalizedAccount,
+						site_key: dims.siteKey ?? "",
+						action: dims.action ?? "",
+						event_type: dims.eventType ?? "",
+					},
+					value: group.count ?? 0,
+				});
+			}
+		}
+
+		return events.values.length > 0 ? [events] : [];
 	}
 
 	/**
