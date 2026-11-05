@@ -23,6 +23,7 @@ import type {
 	Zone,
 } from "../lib/types";
 import { LoadBalancerPoolSchema } from "../lib/types";
+import type { VariablesOf } from "./gql/client";
 import {
 	AdaptiveMetricsQuery,
 	CacheMissMetricsQuery,
@@ -567,15 +568,11 @@ export class CloudflareMetricsClient {
 		normalizedAccount: string,
 		timeRange: TimeRange,
 	): Promise<MetricDefinition[]> {
-		const result = await this.gql.query(TurnstileMetricsQuery, {
-			accountID: accountId,
-			mintime: timeRange.mintime,
-			maxtime: timeRange.maxtime,
-			limit: this.config.queryLimit,
-		});
-		if (result.error) {
-			throw graphQLQueryError("turnstile", result.error);
-		}
+		const window = {
+			datetime_geq: timeRange.mintime,
+			datetime_lt: timeRange.maxtime,
+		};
+		let filter: VariablesOf<typeof TurnstileMetricsQuery>["filter"] = window;
 
 		const events: MetricDefinition = {
 			name: "cloudflare_turnstile_events_total",
@@ -584,21 +581,52 @@ export class CloudflareMetricsClient {
 			values: [],
 		};
 
-		for (const accountData of result.data?.viewer?.accounts ?? []) {
-			for (const group of accountData.turnstileAdaptiveGroups ?? []) {
+		while (true) {
+			const result = await this.gql.query(TurnstileMetricsQuery, {
+				accountID: accountId,
+				filter,
+				limit: this.config.queryLimit,
+			});
+			if (result.error) {
+				throw graphQLQueryError("turnstile", result.error);
+			}
+
+			// accountTag selects one account. Each page groups by the full label tuple.
+			const groups =
+				result.data?.viewer?.accounts?.[0]?.turnstileAdaptiveGroups ?? [];
+			for (const group of groups) {
 				const dims = group.dimensions;
 				if (dims == null) continue;
 
 				events.values.push({
 					labels: {
 						account: normalizedAccount,
-						site_key: dims.siteKey ?? "",
-						action: dims.action ?? "",
-						event_type: dims.eventType ?? "",
+						site_key: dims.siteKey,
+						action: dims.action,
+						event_type: dims.eventType,
 					},
-					value: group.count ?? 0,
+					value: group.count,
 				});
 			}
+			if (groups.length < this.config.queryLimit) break;
+
+			const last = groups.at(-1)?.dimensions;
+			if (last == null) {
+				throw new Error("Cannot paginate Turnstile events without dimensions");
+			}
+			// Advance lexicographically, not independently: actions reset at each widget.
+			filter = {
+				...window,
+				OR: [
+					{ siteKey_gt: last.siteKey },
+					{ siteKey: last.siteKey, action_gt: last.action },
+					{
+						siteKey: last.siteKey,
+						action: last.action,
+						eventType_gt: last.eventType,
+					},
+				],
+			};
 		}
 
 		return events.values.length > 0 ? [events] : [];

@@ -281,6 +281,9 @@ Each series counts one event type for a widget and action.
 Empty action values remain empty. The collector preserves new event types without an exporter update.
 The existing refresh process adds each window's counts to persistent counters.
 Scrapes return cached counters and do not add counts.
+The collector fetches all result pages before it updates counters.
+`QUERY_LIMIT` sets the maximum groups per API request, not the total number of exported series.
+Each extra page requires another API request. If any page fails, the refresh retains the previous counters.
 
 Cloudflare labels this dataset beta and uses adaptive sampling. Counts can therefore be estimates.
 The configured scrape delay also applies to these metrics.
@@ -297,7 +300,8 @@ sum by (account, site_key, event_type) (
 
 References: [Turnstile Analytics](https://developers.cloudflare.com/turnstile/turnstile-analytics/),
 [GraphQL dataset catalogue](https://developers.cloudflare.com/data-localization/metadata-boundary/graphql-datasets/),
-[adaptive sampling](https://developers.cloudflare.com/analytics/graphql-api/sampling/).
+[adaptive sampling](https://developers.cloudflare.com/analytics/graphql-api/sampling/),
+[GraphQL pagination](https://developers.cloudflare.com/analytics/graphql-api/features/pagination/).
 
 ### Health Check Metrics
 

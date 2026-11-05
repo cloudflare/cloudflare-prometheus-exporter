@@ -1057,14 +1057,14 @@ export const TurnstileMetricsQuery = graphql(`
   query TurnstileMetrics(
     $accountID: string!
     $limit: uint64!
-    $mintime: Time!
-    $maxtime: Time!
+    $filter: AccountTurnstileAdaptiveGroupsFilter_InputObject!
   ) {
     viewer {
       accounts(filter: { accountTag: $accountID }) {
         turnstileAdaptiveGroups(
           limit: $limit
-          filter: { datetime_geq: $mintime, datetime_lt: $maxtime }
+          filter: $filter
+          orderBy: [siteKey_ASC, action_ASC, eventType_ASC]
         ) {
           count
           dimensions {

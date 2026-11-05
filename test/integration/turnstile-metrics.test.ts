@@ -73,14 +73,16 @@ describe("Turnstile MetricExporter integration", () => {
 				const { variables } = z
 					.object({
 						variables: z.object({
-							mintime: z.string(),
-							maxtime: z.string(),
+							filter: z.object({
+								datetime_geq: z.string(),
+								datetime_lt: z.string(),
+							}),
 						}),
 					})
 					.parse(await request.json());
 				const window = {
-					mintime: variables.mintime,
-					maxtime: variables.maxtime,
+					mintime: variables.filter.datetime_geq,
+					maxtime: variables.filter.datetime_lt,
 				};
 				const isThirdWindow = window.maxtime === thirdWindow.maxtime;
 				const failure = isThirdWindow && failThirdWindow;
