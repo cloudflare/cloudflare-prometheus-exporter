@@ -8,7 +8,7 @@ Export Cloudflare metrics to Prometheus. Built on Cloudflare Workers with Durabl
 
 ## Features
 
-- **90+ Prometheus metrics** - requests, bandwidth, threats, workers, load balancers, SSL certs, hostname-level analytics, network analytics, Magic Transit tunnel health/traffic/SLO, Magic Firewall per-rule visibility, stream video/live, and more
+- **90+ Prometheus metrics** - requests, bandwidth, threats, workers, load balancers, SSL certs, hostname-level analytics, network analytics, Magic Transit tunnel health/traffic/SLO, Magic Firewall per-rule visibility, Turnstile events, stream video/live, and more
 - **Cloudflare Workers** - serverless edge deployment
 - **Durable Objects** - stateful counter accumulation for proper Prometheus semantics
 - **Background refresh** - alarms fetch data every 60s; scrapes return cached data instantly
@@ -56,6 +56,7 @@ Set in `wrangler.jsonc` or via `wrangler secret put`:
 | `HEALTH_CHECK_CACHE_TTL_SECONDS` | 10 | Health check cache TTL |
 | `EXCLUDE_HOST` | false | Exclude host labels from metrics |
 | `CF_HTTP_STATUS_GROUP` | false | Group HTTP status codes (2xx, 4xx, etc.) |
+| `PACKED_METRIC_STORAGE` | false | Enable compact storage and chunked output for zone metrics. Accepts the deprecated name `COLO_METRICS_PACKED_STORAGE`. |
 | `DISABLE_UI` | false | Disable landing page (returns 404) |
 | `DISABLE_CONFIG_API` | false | Disable config API endpoints (returns 404) |
 | `METRICS_DENYLIST` | - | Comma-separated list of metrics to exclude |
@@ -156,6 +157,8 @@ Override configuration at runtime without redeployment. Overrides persist in KV 
 | `metricsDenylist` | string | Comma-separated metrics to exclude |
 | `excludeHost` | boolean | Exclude host labels |
 | `httpStatusGroup` | boolean | Group HTTP status codes |
+| `packedMetricStorage` | boolean | Enable compact by-zone storage and chunked read output for supported high-cardinality queries, including edge-country, health-check, and hostname HTTP metrics |
+| `coloMetricsPackedStorage` | boolean | Deprecated alias for `packedMetricStorage` |
 | `hostMetricsAllowlist` | string | Comma-separated hostnames for hostname-level metrics |
 | `hostMetricsDelaySeconds` | number | Ingestion delay for hostname metrics (seconds) |
 
@@ -178,12 +181,28 @@ curl -X PUT https://your-worker.workers.dev/config/cfZones \
   -H "Content-Type: application/json" \
   -d '{"value": "zone-id-1,zone-id-2"}'
 
+# Enable compact packed metric storage for trial rollout
+curl -X PUT https://your-worker.workers.dev/config/packedMetricStorage \
+  -H "Content-Type: application/json" \
+  -d '{"value": true}'
+
 # Reset to env default
 curl -X DELETE https://your-worker.workers.dev/config/logLevel
 
 # Reset all overrides
 curl -X DELETE https://your-worker.workers.dev/config
 ```
+
+### Packed metric storage
+
+`packedMetricStorage` stores selected queries in compact typed state with named label columns instead of label-repeating rows, and streams the output in bounded chunks. Metric names and labels are unchanged.
+
+- Enabling packed storage migrates active and retained counters before adding the next window. Disabling deletes packed snapshots and starts a fresh unpacked counter generation on the next refresh.
+- The storage mode is resolved once per scrape and applied to every account, so a scrape never mixes packed and unpacked output for the same metric family.
+- Each counter series stores its own retry checkpoint. Replaying the same query window is idempotent. Series not seen for five refreshes are dropped; until then they are exported with their last value (a flat counter), whereas the unpacked path stops exporting a series the moment it is absent.
+- When `excludeHost` is set, packed rows that collapse onto the same remaining labels are summed, matching the unpacked serializer.
+- Packed queries keep their existing metric families. `colo-metrics` uses its reduced packed query, health checks use separate event and timing aliases, and hostname metrics preserve their four aliases and fixed one-minute window.
+- The 16 MiB serialized-state guard (`Chunked storage value exceeds the safe size limit`) still applies per query. Families with identical label columns share one copy, keeping high-cardinality multi-family queries such as `colo-metrics` within the guard.
 
 ## Available Metrics
 
@@ -247,6 +266,42 @@ curl -X DELETE https://your-worker.workers.dev/config
 |--------|------|--------|
 | `cloudflare_zone_firewall_events_total` | counter | zone, action, source, rule, host, country |
 | `cloudflare_zone_firewall_bots_detected_total` | counter | zone, bot_score, detection_source |
+
+### Turnstile Metrics
+
+| Metric | Type | Labels |
+|--------|------|--------|
+| `cloudflare_turnstile_events_total` | counter | account, site_key, action, event_type |
+
+The `turnstile` collector queries the account-level `turnstileAdaptiveGroups` dataset.
+It also runs for Free accounts and accounts without zones.
+The API token needs **Account > Account Analytics > Read** permission for the account.
+
+Each series counts one event type for a widget and action.
+Empty action values remain empty. The collector preserves new event types without an exporter update.
+The existing refresh process adds each window's counts to persistent counters.
+Scrapes return cached counters and do not add counts.
+The collector fetches all result pages before it updates counters.
+`QUERY_LIMIT` sets the maximum groups per API request, not the total number of exported series.
+Each extra page requires another API request. If any page fails, the refresh retains the previous counters.
+
+Cloudflare labels this dataset beta and uses adaptive sampling. Counts can therefore be estimates.
+The configured scrape delay also applies to these metrics.
+Challenge solves and successful Siteverify validations are separate events. Neither is an application block count.
+Use bounded action values to limit the number of series.
+
+For example, query the event rate per widget:
+
+```promql
+sum by (account, site_key, event_type) (
+  rate(cloudflare_turnstile_events_total[5m])
+)
+```
+
+References: [Turnstile Analytics](https://developers.cloudflare.com/turnstile/turnstile-analytics/),
+[GraphQL dataset catalogue](https://developers.cloudflare.com/data-localization/metadata-boundary/graphql-datasets/),
+[adaptive sampling](https://developers.cloudflare.com/analytics/graphql-api/sampling/),
+[GraphQL pagination](https://developers.cloudflare.com/analytics/graphql-api/features/pagination/).
 
 ### Health Check Metrics
 
@@ -315,7 +370,6 @@ curl -X DELETE https://your-worker.workers.dev/config
 
 | Metric | Type | Labels |
 |--------|------|--------|
-| `cloudflare_magic_transit_active_tunnels` | gauge | account, tunnel_name, site_name |
 | `cloudflare_magic_transit_healthy_tunnels` | gauge | account, tunnel_name, site_name |
 | `cloudflare_magic_transit_tunnel_failures` | gauge | account, tunnel_name, site_name |
 | `cloudflare_magic_transit_edge_colo_count` | gauge | account, tunnel_name, site_name |
@@ -528,14 +582,15 @@ For mixed accounts (enterprise + free zones), only free zones are skipped—paid
 │   ▼            ▼      ▼            ▼      ▼            ▼                       │
 │ ┌─────┐    ┌─────┐  ┌─────┐    ┌─────┐  ┌─────┐    ┌─────┐                     │
 │ │Exprt│    │Exprt│  │Exprt│    │Exprt│  │Exprt│    │Exprt│                     │
-│ │(21) │ .. │(N)  │  │(21) │ .. │(N)  │  │(21) │ .. │(N)  │                     │
+│ │(23) │ .. │(N)  │  │(23) │ .. │(N)  │  │(23) │ .. │(N)  │                     │
 │ │acct │    │zone │  │acct │    │zone │  │acct │    │zone │                     │
 │ └─────┘    └─────┘  └─────┘    └─────┘  └─────┘    └─────┘                     │
 │                                                                                │
 │  MetricExporter DOs (per account):                                             │
-│  - Account-scoped (21): worker-totals, logpush-account, magic-transit,         │
+│  - Account-scoped (23): worker-totals, logpush-account, magic-transit,         │
 │    magic-transit-slo, magic-transit-traffic, magic-firewall-samples,           │
 │    network-analytics, stream-video-playback, stream-live-inputs,              │
+│    images, turnstile,                                                        │
 │    http-metrics, adaptive-metrics, edge-country-metrics,                      │
 │    colo-metrics, colo-error-metrics, request-method-metrics,                   │
 │    health-check-metrics, load-balancer-metrics, logpush-zone,                  │
@@ -587,7 +642,7 @@ For mixed accounts (enterprise + free zones), only free zones are skipped—paid
   ▼           ▼         ▼           ▼         ▼           ▼
 ┌─────┐   ┌─────┐    ┌─────┐   ┌─────┐    ┌─────┐   ┌─────┐
 │Exprt│...│Exprt│    │Exprt│...│Exprt│    │Exprt│...│Exprt│
-│21+N │   │     │    │21+N │   │     │    │21+N │   │     │
+│23+N │   │     │    │23+N │   │     │    │23+N │   │     │
 │     │   │     │    │     │   │     │    │     │   │     │
 │ ret │   │ ret │    │ ret │   │ ret │    │ ret │   │ ret │
 │cache│   │cache│    │cache│   │cache│    │cache│   │cache│
@@ -648,7 +703,7 @@ For mixed accounts (enterprise + free zones), only free zones are skipped—paid
 │                                                                        │
 │  3. Push context to MetricExporter DOs:                                │
 │     ┌────────────────────────────────────────────────────────────────┐ │
-│     │ Account-scoped (21 exporters):                                 │ │
+│     │ Account-scoped (23 exporters):                                 │ │
 │     │   exporter.updateZoneContext(accountId, accountName, zones)    │ │
 │     │                                                                │ │
 │     │ Zone-scoped (N exporters, 1 per zone):                         │ │
@@ -665,8 +720,8 @@ For mixed accounts (enterprise + free zones), only free zones are skipped—paid
 ┌────────────────────────────────────────────────────────────────────────┐
 │           MetricExporter.refresh() for account-scoped queries          │
 │                                                                        │
-│  Query Types (21 total):                                               │
-│  ├── ACCOUNT-LEVEL (single account per query, 9):                      │
+│  Query Types (23 total):                                               │
+│  ├── ACCOUNT-LEVEL (single account per query, 11):                     │
 │  │   ├── worker-totals                                                 │
 │  │   ├── logpush-account                                               │
 │  │   ├── magic-transit                                                 │
@@ -675,7 +730,9 @@ For mixed accounts (enterprise + free zones), only free zones are skipped—paid
 │  │   ├── magic-firewall-samples                                        │
 │  │   ├── network-analytics                                             │
 │  │   ├── stream-video-playback                                         │
-│  │   └── stream-live-inputs                                            │
+│  │   ├── stream-live-inputs                                            │
+│  │   ├── images (REST)                                                 │
+│  │   └── turnstile                                                     │
 │  │                                                                     │
 │  └── ZONE-LEVEL (all zones batched in one query, 12):                  │
 │      ├── http-metrics                                                  │
@@ -696,12 +753,23 @@ For mixed accounts (enterprise + free zones), only free zones are skipped—paid
 └────────────────────────────────────────────────────────────────────────┘
 ```
 
+Counter series are retained for five missed refreshes before being pruned. Metric
+exporter snapshots are persisted in bounded chunks (with a 16 MiB total safety
+limit), product queries denied by Cloudflare are retried hourly, and unexpected
+alarm failures schedule a recovery alarm so metric refreshes cannot silently stop.
+
+Chunked snapshots retain the last unchunked state at the legacy storage key, but a
+rollback to a pre-chunking release cannot read the current chunked snapshot and may
+resume the original oversized-write failure. Prefer a forward fix after deployment.
+
 ## Development
 
 ```bash
 bun install          # Install dependencies
 bun run dev          # Run locally (port 8787)
 bun run check        # Lint + format check
+bun run test         # Run tests
+bun run typecheck    # Type-check without emitting files
 bun run deploy       # Deploy to Cloudflare
 ```
 

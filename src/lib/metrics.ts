@@ -62,7 +62,8 @@ export function mergeMetricDefinitions(
 		for (const m of metrics) {
 			const existing = byName.get(m.name);
 			if (existing) {
-				existing.values.push(...m.values);
+				// Spreading into push() overflows the call stack past ~100k values.
+				for (const value of m.values) existing.values.push(value);
 			} else {
 				byName.set(m.name, {
 					name: m.name,

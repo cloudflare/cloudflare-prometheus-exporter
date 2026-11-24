@@ -1,7 +1,8 @@
-import { Client, fetchExchange } from "@urql/core";
+import { Client, type CombinedError, fetchExchange } from "@urql/core";
 import Cloudflare from "cloudflare";
 import DataLoader from "dataloader";
 import z from "zod";
+import { ColumnarObservationSink } from "../lib/columnar-observations";
 import { GraphQLError } from "../lib/errors";
 import { findZoneName } from "../lib/filters";
 import {
@@ -11,6 +12,7 @@ import {
 	type LoggerConfig,
 } from "../lib/logger";
 import type { MetricDefinition } from "../lib/metrics";
+import type { ColumnarMetricSource } from "../lib/packed-columnar-metric";
 import { getEnvDefaults } from "../lib/runtime-config";
 import type {
 	Account,
@@ -21,10 +23,12 @@ import type {
 	Zone,
 } from "../lib/types";
 import { LoadBalancerPoolSchema } from "../lib/types";
+import type { VariablesOf } from "./gql/client";
 import {
 	AdaptiveMetricsQuery,
 	CacheMissMetricsQuery,
 	ColoErrorMetricsQuery,
+	ColoMetricsPackedStorageQuery,
 	ColoMetricsQuery,
 	EdgeCountryMetricsQuery,
 	HealthCheckMetricsQuery,
@@ -43,6 +47,7 @@ import {
 	RequestMethodMetricsQuery,
 	StreamLiveInputsQuery,
 	StreamVideoPlaybackQuery,
+	TurnstileMetricsQuery,
 	WorkerTotalsQuery,
 } from "./gql/queries";
 import type { AccountLevelQuery, ZoneLevelQuery } from "./queries";
@@ -65,6 +70,14 @@ export {
 } from "./queries";
 
 const API_PAGE_SIZE = 100;
+
+function graphQLQueryError(query: string, error: CombinedError): GraphQLError {
+	return new GraphQLError(
+		`GraphQL error (${query}): ${error.message}`,
+		error.graphQLErrors ?? [],
+		{ context: { query } },
+	);
+}
 
 /**
  * Groups HTTP status code into category string.
@@ -536,11 +549,89 @@ export class CloudflareMetricsClient {
 					normalizedAccount,
 					timeRange,
 				);
+			case "images":
+				return this.getImagesMetrics(accountId, normalizedAccount);
+			case "turnstile":
+				return this.getTurnstileMetrics(
+					accountId,
+					normalizedAccount,
+					timeRange,
+				);
 			default: {
 				const _exhaustive: never = query;
 				throw new Error(`Unknown account metric query: ${_exhaustive}`);
 			}
 		}
+	}
+
+	/** Fetches sampled Turnstile event counts per widget, action, and event type. */
+	private async getTurnstileMetrics(
+		accountId: string,
+		normalizedAccount: string,
+		timeRange: TimeRange,
+	): Promise<MetricDefinition[]> {
+		const window = {
+			datetime_geq: timeRange.mintime,
+			datetime_lt: timeRange.maxtime,
+		};
+		let filter: VariablesOf<typeof TurnstileMetricsQuery>["filter"] = window;
+
+		const events: MetricDefinition = {
+			name: "cloudflare_turnstile_events_total",
+			help: "Turnstile events estimated from adaptive sampling",
+			type: "counter",
+			values: [],
+		};
+
+		while (true) {
+			const result = await this.gql.query(TurnstileMetricsQuery, {
+				accountID: accountId,
+				filter,
+				limit: this.config.queryLimit,
+			});
+			if (result.error) {
+				throw graphQLQueryError("turnstile", result.error);
+			}
+
+			// accountTag selects one account. Each page groups by the full label tuple.
+			const groups =
+				result.data?.viewer?.accounts?.[0]?.turnstileAdaptiveGroups ?? [];
+			for (const group of groups) {
+				const dims = group.dimensions;
+				if (dims == null) continue;
+
+				events.values.push({
+					labels: {
+						account: normalizedAccount,
+						site_key: dims.siteKey,
+						action: dims.action,
+						event_type: dims.eventType,
+					},
+					value: group.count,
+				});
+			}
+			if (groups.length < this.config.queryLimit) break;
+
+			const last = groups.at(-1)?.dimensions;
+			if (last == null) {
+				throw new Error("Cannot paginate Turnstile events without dimensions");
+			}
+			// Advance lexicographically, not independently: actions reset at each widget.
+			filter = {
+				...window,
+				OR: [
+					{ siteKey_gt: last.siteKey },
+					{ siteKey: last.siteKey, action_gt: last.action },
+					{
+						siteKey: last.siteKey,
+						action: last.action,
+						eventType_gt: last.eventType,
+					},
+				],
+			};
+		}
+
+		return events.values.length > 0 ? [events] : [];
 	}
 
 	/**
@@ -564,8 +655,7 @@ export class CloudflareMetricsClient {
 		});
 
 		if (result.error) {
-			this.logger.error("GraphQL error", { error: result.error.message });
-			return [];
+			throw graphQLQueryError("worker-totals", result.error);
 		}
 
 		const metrics: MetricDefinition[] = [];
@@ -597,9 +687,11 @@ export class CloudflareMetricsClient {
 		for (const accountData of result.data?.viewer?.accounts ?? []) {
 			for (const worker of accountData.workersInvocationsAdaptive ?? []) {
 				const scriptName = worker.dimensions?.scriptName ?? "unknown";
+				const status = worker.dimensions?.status ?? "unknown";
 				const baseLabels = {
 					script_name: scriptName,
 					account: normalizedAccount,
+					status: status,
 				};
 
 				requestsMetric.values.push({
@@ -644,7 +736,6 @@ export class CloudflareMetricsClient {
 				}
 			}
 		}
-		}
 
 		if (requestsMetric.values.length > 0) metrics.push(requestsMetric);
 		if (errorsMetric.values.length > 0) metrics.push(errorsMetric);
@@ -675,8 +766,7 @@ export class CloudflareMetricsClient {
 		});
 
 		if (result.error) {
-			this.logger.error("GraphQL error", { error: result.error.message });
-			return [];
+			throw graphQLQueryError("logpush-account", result.error);
 		}
 
 		const metric: MetricDefinition = {
@@ -698,7 +788,6 @@ export class CloudflareMetricsClient {
 					value: group.count ?? 0,
 				});
 			}
-		}
 		}
 
 		return metric.values.length > 0 ? [metric] : [];
@@ -725,16 +814,9 @@ export class CloudflareMetricsClient {
 		});
 
 		if (result.error) {
-			this.logger.error("GraphQL error", { error: result.error.message });
-			return [];
+			throw graphQLQueryError("magic-transit", result.error);
 		}
 
-		const activeTunnels: MetricDefinition = {
-			name: "cloudflare_magic_transit_active_tunnels",
-			help: "Active Magic Transit tunnels",
-			type: "gauge",
-			values: [],
-		};
 		const healthyTunnels: MetricDefinition = {
 			name: "cloudflare_magic_transit_healthy_tunnels",
 			help: "Healthy Magic Transit tunnels",
@@ -811,31 +893,25 @@ export class CloudflareMetricsClient {
 						site_name: siteName,
 					};
 
-					// Active: count where active=1 (uint8 boolean in CF schema)
-					const active = tunnelGroups
-						.filter((g) => (g.dimensions?.active ?? 0) === 1)
-						.reduce((sum, g) => sum + (g.count ?? 0), 0);
-					if (active > 0) activeTunnels.values.push({ labels, value: active });
-
-					// Healthy: resultStatus === "healthy"
+					// Healthy: resultStatus === "ok" (the API never returns "healthy")
 					const healthy = tunnelGroups
-						.filter((g) => g.dimensions?.resultStatus === "healthy")
+						.filter((g) => g.dimensions?.resultStatus === "ok")
 						.reduce((sum, g) => sum + (g.count ?? 0), 0);
 					if (healthy > 0)
 						healthyTunnels.values.push({ labels, value: healthy });
 
-					// Failures: resultStatus !== "healthy"
+					// Failures: everything that isn't "ok"
 					const failures = tunnelGroups
-						.filter((g) => g.dimensions?.resultStatus !== "healthy")
+						.filter((g) => g.dimensions?.resultStatus !== "ok")
 						.reduce((sum, g) => sum + (g.count ?? 0), 0);
 					if (failures > 0)
 						tunnelFailures.values.push({ labels, value: failures });
 
-					// Failures by status: group non-healthy results by resultStatus
+					// Failures by status: group non-"ok" results by resultStatus
 					const byStatus = new Map<string, number>();
 					for (const g of tunnelGroups) {
 						const status = g.dimensions?.resultStatus ?? "";
-						if (status === "healthy" || status === "") continue;
+						if (status === "ok" || status === "") continue;
 						byStatus.set(status, (byStatus.get(status) ?? 0) + (g.count ?? 0));
 					}
 					for (const [status, count] of byStatus) {
@@ -881,10 +957,8 @@ export class CloudflareMetricsClient {
 				}
 			}
 		}
-		}
 
 		return [
-			activeTunnels,
 			healthyTunnels,
 			tunnelFailures,
 			edgeColoCount,
@@ -919,10 +993,7 @@ export class CloudflareMetricsClient {
 		});
 
 		if (result.error) {
-			this.logger.error("GraphQL error (magic-transit-slo)", {
-				error: result.error.message,
-			});
-			return [];
+			throw graphQLQueryError("magic-transit-slo", result.error);
 		}
 
 		const sloStatus: MetricDefinition = {
@@ -1022,7 +1093,6 @@ export class CloudflareMetricsClient {
 				}
 			}
 		}
-		}
 
 		return [sloStatus, effectiveSlo, targetSlo].filter(
 			(m) => m.values.length > 0,
@@ -1053,10 +1123,7 @@ export class CloudflareMetricsClient {
 		});
 
 		if (result.error) {
-			this.logger.error("GraphQL error (magic-transit-traffic)", {
-				error: result.error.message,
-			});
-			return [];
+			throw graphQLQueryError("magic-transit-traffic", result.error);
 		}
 
 		const bits: MetricDefinition = {
@@ -1090,7 +1157,6 @@ export class CloudflareMetricsClient {
 				packets.values.push({ labels, value: group.sum?.packets ?? 0 });
 			}
 		}
-		}
 
 		return [bits, packets].filter((m) => m.values.length > 0);
 	}
@@ -1119,10 +1185,7 @@ export class CloudflareMetricsClient {
 		});
 
 		if (result.error) {
-			this.logger.error("GraphQL error (magic-firewall-samples)", {
-				error: result.error.message,
-			});
-			return [];
+			throw graphQLQueryError("magic-firewall-samples", result.error);
 		}
 
 		const bits: MetricDefinition = {
@@ -1152,7 +1215,6 @@ export class CloudflareMetricsClient {
 				bits.values.push({ labels, value: group.sum?.bits ?? 0 });
 				packets.values.push({ labels, value: group.sum?.packets ?? 0 });
 			}
-		}
 		}
 
 		return [bits, packets].filter((m) => m.values.length > 0);
@@ -1184,10 +1246,7 @@ export class CloudflareMetricsClient {
 		});
 
 		if (result.error) {
-			this.logger.error("GraphQL error (network-analytics)", {
-				error: result.error.message,
-			});
-			return [];
+			throw graphQLQueryError("network-analytics", result.error);
 		}
 
 		const metrics: MetricDefinition[] = [];
@@ -1252,7 +1311,6 @@ export class CloudflareMetricsClient {
 				normalizedAccount,
 				metrics,
 			);
-		}
 		}
 
 		return metrics.filter((m) => m.values.length > 0);
@@ -1342,11 +1400,7 @@ export class CloudflareMetricsClient {
 			limit: this.config.queryLimit,
 		});
 		if (result.error) {
-			this.logger.error("GraphQL error (stream-video-playback)", {
-				account: normalizedAccount,
-				error: result.error.message,
-			});
-			return [];
+			throw graphQLQueryError("stream-video-playback", result.error);
 		}
 
 		const playbackCount: MetricDefinition = {
@@ -1380,7 +1434,6 @@ export class CloudflareMetricsClient {
 				});
 			}
 		}
-		}
 		return [playbackCount, secondsViewed].filter((m) => m.values.length > 0);
 	}
 
@@ -1405,11 +1458,7 @@ export class CloudflareMetricsClient {
 		});
 
 		if (result.error) {
-			this.logger.error("GraphQL error (stream-live-inputs)", {
-				account: normalizedAccount,
-				error: result.error.message,
-			});
-			return [];
+			throw graphQLQueryError("stream-live-inputs", result.error);
 		}
 
 		const segments: MetricDefinition = {
@@ -1462,7 +1511,6 @@ export class CloudflareMetricsClient {
 				});
 			}
 		}
-		}
 
 		return [segments, bitRate, gopDuration, uploadRatio].filter(
 			(m) => m.values.length > 0,
@@ -1470,16 +1518,62 @@ export class CloudflareMetricsClient {
 	}
 
 	/**
+	 * Fetches Cloudflare Images storage metrics (current count and allowed limit).
+	 *
+	 * @param accountId Cloudflare account ID.
+	 * @param normalizedAccount Normalized account name for labels.
+	 * @returns Images count metrics.
+	 */
+	private async getImagesMetrics(
+		accountId: string,
+		normalizedAccount: string,
+	): Promise<MetricDefinition[]> {
+		const countCurrent: MetricDefinition = {
+			name: "cloudflare_images_count_current",
+			help: "Current number of images stored in Cloudflare Images",
+			type: "gauge",
+			values: [],
+		};
+		const countAllowed: MetricDefinition = {
+			name: "cloudflare_images_count_allowed",
+			help: "Maximum number of images allowed by the account plan",
+			type: "gauge",
+			values: [],
+		};
+
+		try {
+			const response = await this.api.images.v1.stats.get({
+				account_id: accountId,
+			});
+			const labels = { account: normalizedAccount };
+			countCurrent.values.push({ labels, value: response.count?.current ?? 0 });
+			countAllowed.values.push({ labels, value: response.count?.allowed ?? 0 });
+		} catch (error) {
+			const msg = error instanceof Error ? error.message : String(error);
+			this.logger.error("Failed to fetch Images stats", {
+				account_id: accountId,
+				error: msg,
+			});
+			return [];
+		}
+
+		return [countCurrent, countAllowed].filter((m) => m.values.length > 0);
+	}
+
+	/**
 	 * Fetches zone-level metrics for a specific query type.
 	 * Requires zone IDs and zone metadata for label resolution.
 	 *
 	 * @param query Zone-level query name.
+	 * @param accountId Cloudflare account ID that owns the zones.
 	 * @param zoneIds Array of Cloudflare zone IDs.
 	 * @param zones Zone metadata for label mapping.
 	 * @param firewallRules Map of firewall rule IDs to names.
 	 * @param timeRange Shared time range for query alignment.
 	 * @param hostMetricsAllowlist Allowed hostnames for hostname-http-metrics query.
 	 * @param hostMetricsDelaySeconds Ingestion delay override for hostname metrics.
+	 * @param httpStatusGroup Whether to group HTTP response statuses by class.
+	 * @param packedMetricStorage Whether packed storage is enabled, allowing reduced query selections.
 	 * @returns Promise of metric definitions for the zones.
 	 * @throws {Error} When unknown query type provided.
 	 */
@@ -1492,6 +1586,9 @@ export class CloudflareMetricsClient {
 		timeRange: TimeRange,
 		hostMetricsAllowlist?: ReadonlySet<string>,
 		hostMetricsDelaySeconds?: number,
+		httpStatusGroup = false,
+		packedMetricStorage = false,
+		observationSink?: ColumnarObservationSink,
 	): Promise<MetricDefinition[]> {
 		this.logger.info("Fetching zone metrics", {
 			query,
@@ -1501,48 +1598,143 @@ export class CloudflareMetricsClient {
 		switch (query) {
 			case "http-metrics":
 				return this.getHttpMetricsHandler(
+					accountId,
 					zoneIds,
 					zones,
 					firewallMap,
 					timeRange,
+					httpStatusGroup,
+					observationSink,
 				);
 			case "adaptive-metrics":
-				return this.getAdaptiveMetrics(accountId, zoneIds, zones, timeRange);
+				return this.getAdaptiveMetrics(
+					accountId,
+					zoneIds,
+					zones,
+					timeRange,
+					observationSink,
+				);
 			case "edge-country-metrics":
-				return this.getEdgeCountryMetrics(accountId, zoneIds, zones, timeRange);
+				return this.getEdgeCountryMetrics(
+					accountId,
+					zoneIds,
+					zones,
+					timeRange,
+					observationSink,
+				);
 			case "colo-metrics":
-				return this.getColoMetrics(accountId, zoneIds, zones, timeRange);
+				return this.getColoMetrics(
+					accountId,
+					zoneIds,
+					zones,
+					timeRange,
+					packedMetricStorage,
+					observationSink,
+				);
 			case "colo-error-metrics":
-				return this.getColoErrorMetrics(accountId, zoneIds, zones, timeRange);
+				return this.getColoErrorMetrics(
+					accountId,
+					zoneIds,
+					zones,
+					timeRange,
+					observationSink,
+				);
 			case "request-method-metrics":
-				return this.getRequestMethodMetrics(accountId, zoneIds, zones, timeRange);
+				return this.getRequestMethodMetrics(
+					accountId,
+					zoneIds,
+					zones,
+					timeRange,
+					observationSink,
+				);
 			case "health-check-metrics":
-				return this.getHealthCheckMetrics(accountId, zoneIds, zones, timeRange);
+				return this.getHealthCheckMetrics(
+					accountId,
+					zoneIds,
+					zones,
+					timeRange,
+					observationSink,
+				);
 			case "load-balancer-metrics":
-				return this.getLoadBalancerMetrics(accountId, zoneIds, zones, timeRange);
+				return this.getLoadBalancerMetrics(
+					accountId,
+					zoneIds,
+					zones,
+					timeRange,
+					packedMetricStorage,
+					observationSink,
+				);
 			case "logpush-zone":
-				return this.getLogpushZoneMetrics(accountId, zoneIds, zones, timeRange);
+				return this.getLogpushZoneMetrics(
+					accountId,
+					zoneIds,
+					zones,
+					timeRange,
+					observationSink,
+				);
 			case "origin-status-metrics":
-				return this.getOriginStatusMetrics(accountId, zoneIds, zones, timeRange);
+				return this.getOriginStatusMetrics(
+					accountId,
+					zoneIds,
+					zones,
+					timeRange,
+					observationSink,
+				);
 			case "cache-miss-metrics":
-				return this.getCacheMissMetrics(accountId, zoneIds, zones, timeRange);
+				return this.getCacheMissMetrics(
+					accountId,
+					zoneIds,
+					zones,
+					timeRange,
+					observationSink,
+				);
 			case "hostname-http-metrics":
 				return this.getHostnameHttpMetrics(
+					accountId,
 					zoneIds,
 					zones,
 					timeRange,
 					hostMetricsAllowlist,
 					hostMetricsDelaySeconds,
+					observationSink,
 				);
 			case "ssl-certificates":
-				return this.getSSLCertificateMetrics(zones);
+				return this.getSSLCertificateMetrics(zones, observationSink);
 			case "lb-weight-metrics":
-				return this.getLbWeightMetrics(zones);
+				return this.getLbWeightMetrics(zones, observationSink);
 			default: {
 				const _exhaustive: never = query;
 				throw new Error(`Unknown zone metric query: ${_exhaustive}`);
 			}
 		}
+	}
+
+	async getPackedZoneMetrics(
+		query: ZoneLevelQuery,
+		accountId: string,
+		zoneIds: string[],
+		zones: Zone[],
+		firewallRules: Record<string, string>,
+		timeRange: TimeRange,
+		hostMetricsAllowlist?: ReadonlySet<string>,
+		hostMetricsDelaySeconds?: number,
+		httpStatusGroup = false,
+	): Promise<ColumnarMetricSource[]> {
+		const observationSink = new ColumnarObservationSink();
+		await this.getZoneMetrics(
+			query,
+			accountId,
+			zoneIds,
+			zones,
+			firewallRules,
+			timeRange,
+			hostMetricsAllowlist,
+			hostMetricsDelaySeconds,
+			httpStatusGroup,
+			true,
+			observationSink,
+		);
+		return observationSink.finish();
 	}
 
 	/**
@@ -1553,6 +1745,7 @@ export class CloudflareMetricsClient {
 	 * @param zones Zone metadata for label mapping.
 	 * @param firewallRules Map of rule IDs to names for labels.
 	 * @param timeRange Time range for the query.
+	 * @param httpStatusGroup Whether to group HTTP response statuses by class.
 	 * @returns HTTP metrics.
 	 * @throws {Error} When GraphQL query fails.
 	 */
@@ -1562,6 +1755,8 @@ export class CloudflareMetricsClient {
 		zones: Zone[],
 		firewallRules: Map<string, string>,
 		timeRange: TimeRange,
+		httpStatusGroup: boolean,
+		observationSink?: ColumnarObservationSink,
 	): Promise<MetricDefinition[]> {
 		const queryVars = {
 			accountID: accountId,
@@ -1581,13 +1776,10 @@ export class CloudflareMetricsClient {
 			result = await this.gql.query(HTTPMetricsQueryNoBots, queryVars);
 		}
 
-		// Safety net: free tier zones should be filtered upstream, but handle gracefully
+		// Safety net: free tier zones should be filtered upstream. Surface access
+		// failures so the exporter can back off rather than retry every minute.
 		if (result.error?.message.includes("does not have access to the path")) {
-			this.logger.error(
-				"Zone(s) lack GraphQL analytics access - ensure free tier zones are filtered",
-				{ error: result.error.message },
-			);
-			return [];
+			throw graphQLQueryError("http-metrics", result.error);
 		}
 
 		if (result.error) {
@@ -1631,7 +1823,9 @@ export class CloudflareMetricsClient {
 		};
 		const requestsStatus: MetricDefinition = {
 			name: "cloudflare_zone_requests_status_total",
-			help: "Requests by status code group",
+			help: httpStatusGroup
+				? "Requests by status code group"
+				: "Requests by status code",
 			type: "counter",
 			values: [],
 		};
@@ -1753,9 +1947,36 @@ export class CloudflareMetricsClient {
 			type: "gauge",
 			values: [],
 		};
+		observationSink?.capture([
+			requestsTotal,
+			requestsCached,
+			requestsSsl,
+			requestsContentType,
+			requestsCountry,
+			requestsStatus,
+			requestsBrowser,
+			requestsIpClass,
+			requestsSslProtocol,
+			requestsHttpVersion,
+			bandwidthTotal,
+			bandwidthCached,
+			bandwidthSsl,
+			bandwidthContentType,
+			bandwidthCountry,
+			threatsTotal,
+			threatsCountry,
+			threatsType,
+			pageviewsTotal,
+			uniquesTotal,
+			firewallEvents,
+			botsDetected,
+			botByCountry,
+			cacheHitRatio,
+		]);
 
-		for (const accountData of result.data?.viewer?.accounts ?? []) {
-		for (const zoneData of accountData.zones ?? []) {
+		for (const zoneData of (result.data?.viewer?.accounts ?? []).flatMap(
+			(accountData) => accountData.zones ?? [],
+		)) {
 			const zoneName = findZoneName(zoneData.zoneTag, zones);
 			const baseLabels = { zone: zoneName };
 
@@ -1848,12 +2069,14 @@ export class CloudflareMetricsClient {
 				}
 			}
 
-			// Status code breakdown (with grouping)
+			// Status code breakdown
 			const statusGroups: Record<string, number> = {};
 			for (const s of sum?.responseStatusMap ?? []) {
-				const groupedStatus = groupStatusCode(s.edgeResponseStatus ?? 0);
-				statusGroups[groupedStatus] =
-					(statusGroups[groupedStatus] ?? 0) + (s.requests ?? 0);
+				const statusCode = s.edgeResponseStatus ?? 0;
+				const status = httpStatusGroup
+					? groupStatusCode(statusCode)
+					: String(statusCode);
+				statusGroups[status] = (statusGroups[status] ?? 0) + (s.requests ?? 0);
 			}
 			for (const [status, count] of Object.entries(statusGroups)) {
 				requestsStatus.values.push({
@@ -1963,7 +2186,6 @@ export class CloudflareMetricsClient {
 				}
 			}
 		}
-		}
 
 		// Return only non-empty metrics
 		return [
@@ -2008,6 +2230,7 @@ export class CloudflareMetricsClient {
 		zoneIds: string[],
 		zones: Zone[],
 		timeRange: TimeRange,
+		observationSink?: ColumnarObservationSink,
 	): Promise<MetricDefinition[]> {
 		const result = await this.gql.query(AdaptiveMetricsQuery, {
 			accountID: accountId,
@@ -2018,7 +2241,7 @@ export class CloudflareMetricsClient {
 		});
 
 		if (result.error) {
-			throw new Error(`GraphQL error: ${result.error.message}`);
+			throw graphQLQueryError("adaptive-metrics", result.error);
 		}
 
 		const error4xx: MetricDefinition = {
@@ -2045,13 +2268,20 @@ export class CloudflareMetricsClient {
 			type: "gauge",
 			values: [],
 		};
+		observationSink?.capture([
+			error4xx,
+			error5xx,
+			originDuration,
+			originErrorRate,
+		]);
 
 		// Track totals for error rate calculation
 		const zoneStats: Record<string, { errors4xx: number; errors5xx: number }> =
 			{};
 
-		for (const accountData of result.data?.viewer?.accounts ?? []) {
-		for (const zoneData of accountData.zones ?? []) {
+		for (const zoneData of (result.data?.viewer?.accounts ?? []).flatMap(
+			(accountData) => accountData.zones ?? [],
+		)) {
 			const zoneName = findZoneName(zoneData.zoneTag, zones);
 
 			for (const group of zoneData.httpRequestsAdaptiveGroups ?? []) {
@@ -2086,7 +2316,6 @@ export class CloudflareMetricsClient {
 				}
 			}
 		}
-		}
 
 		// Emit origin error rate (ratio of 5xx to total errors)
 		for (const [zone, stats] of Object.entries(zoneStats)) {
@@ -2118,6 +2347,7 @@ export class CloudflareMetricsClient {
 		zoneIds: string[],
 		zones: Zone[],
 		timeRange: TimeRange,
+		observationSink?: ColumnarObservationSink,
 	): Promise<MetricDefinition[]> {
 		const result = await this.gql.query(EdgeCountryMetricsQuery, {
 			accountID: accountId,
@@ -2128,7 +2358,7 @@ export class CloudflareMetricsClient {
 		});
 
 		if (result.error) {
-			throw new Error(`GraphQL error: ${result.error.message}`);
+			throw graphQLQueryError("edge-country-metrics", result.error);
 		}
 
 		const statusCountryHost: MetricDefinition = {
@@ -2144,12 +2374,14 @@ export class CloudflareMetricsClient {
 			type: "gauge",
 			values: [],
 		};
+		observationSink?.capture([statusCountryHost, edgeErrorRate]);
 
 		// Aggregate for error rate calculation
 		const zoneStats: Record<string, { total: number; errors: number }> = {};
 
-		for (const accountData of result.data?.viewer?.accounts ?? []) {
-		for (const zoneData of accountData.zones ?? []) {
+		for (const zoneData of (result.data?.viewer?.accounts ?? []).flatMap(
+			(accountData) => accountData.zones ?? [],
+		)) {
 			const zoneName = findZoneName(zoneData.zoneTag, zones);
 
 			for (const group of zoneData.httpRequestsEdgeCountryHost ?? []) {
@@ -2178,7 +2410,6 @@ export class CloudflareMetricsClient {
 					}
 				}
 			}
-		}
 		}
 
 		// Emit error rate gauges
@@ -2210,17 +2441,22 @@ export class CloudflareMetricsClient {
 		zoneIds: string[],
 		zones: Zone[],
 		timeRange: TimeRange,
+		packedMetricStorage = false,
+		observationSink?: ColumnarObservationSink,
 	): Promise<MetricDefinition[]> {
-		const result = await this.gql.query(ColoMetricsQuery, {
-			accountID: accountId,
-			zoneIDs: zoneIds,
-			mintime: timeRange.mintime,
-			maxtime: timeRange.maxtime,
-			limit: this.config.queryLimit,
-		});
+		const result = await this.gql.query(
+			packedMetricStorage ? ColoMetricsPackedStorageQuery : ColoMetricsQuery,
+			{
+				accountID: accountId,
+				zoneIDs: zoneIds,
+				mintime: timeRange.mintime,
+				maxtime: timeRange.maxtime,
+				limit: this.config.queryLimit,
+			},
+		);
 
 		if (result.error) {
-			throw new Error(`GraphQL error: ${result.error.message}`);
+			throw graphQLQueryError("colo-metrics", result.error);
 		}
 
 		const visits: MetricDefinition = {
@@ -2241,9 +2477,11 @@ export class CloudflareMetricsClient {
 			type: "counter",
 			values: [],
 		};
+		observationSink?.capture([visits, responseBytes, requestsTotal]);
 
-		for (const accountData of result.data?.viewer?.accounts ?? []) {
-		for (const zoneData of accountData.zones ?? []) {
+		for (const zoneData of (result.data?.viewer?.accounts ?? []).flatMap(
+			(accountData) => accountData.zones ?? [],
+		)) {
 			const zoneName = findZoneName(zoneData.zoneTag, zones);
 
 			for (const group of zoneData.httpRequestsAdaptiveGroups ?? []) {
@@ -2269,7 +2507,6 @@ export class CloudflareMetricsClient {
 				}
 			}
 		}
-		}
 
 		return [visits, responseBytes, requestsTotal].filter(
 			(m) => m.values.length > 0,
@@ -2290,6 +2527,7 @@ export class CloudflareMetricsClient {
 		zoneIds: string[],
 		zones: Zone[],
 		timeRange: TimeRange,
+		observationSink?: ColumnarObservationSink,
 	): Promise<MetricDefinition[]> {
 		const result = await this.gql.query(ColoErrorMetricsQuery, {
 			accountID: accountId,
@@ -2300,7 +2538,7 @@ export class CloudflareMetricsClient {
 		});
 
 		if (result.error) {
-			throw new Error(`GraphQL error: ${result.error.message}`);
+			throw graphQLQueryError("colo-error-metrics", result.error);
 		}
 
 		const visitsError: MetricDefinition = {
@@ -2321,9 +2559,11 @@ export class CloudflareMetricsClient {
 			type: "counter",
 			values: [],
 		};
+		observationSink?.capture([visitsError, responseBytesError, requestsError]);
 
-		for (const accountData of result.data?.viewer?.accounts ?? []) {
-		for (const zoneData of accountData.zones ?? []) {
+		for (const zoneData of (result.data?.viewer?.accounts ?? []).flatMap(
+			(accountData) => accountData.zones ?? [],
+		)) {
 			const zoneName = findZoneName(zoneData.zoneTag, zones);
 
 			for (const group of zoneData.httpRequestsAdaptiveGroups ?? []) {
@@ -2350,7 +2590,6 @@ export class CloudflareMetricsClient {
 				}
 			}
 		}
-		}
 
 		return [visitsError, responseBytesError, requestsError].filter(
 			(m) => m.values.length > 0,
@@ -2371,6 +2610,7 @@ export class CloudflareMetricsClient {
 		zoneIds: string[],
 		zones: Zone[],
 		timeRange: TimeRange,
+		observationSink?: ColumnarObservationSink,
 	): Promise<MetricDefinition[]> {
 		const result = await this.gql.query(RequestMethodMetricsQuery, {
 			accountID: accountId,
@@ -2381,7 +2621,7 @@ export class CloudflareMetricsClient {
 		});
 
 		if (result.error) {
-			throw new Error(`GraphQL error: ${result.error.message}`);
+			throw graphQLQueryError("request-method-metrics", result.error);
 		}
 
 		const methodCount: MetricDefinition = {
@@ -2390,9 +2630,11 @@ export class CloudflareMetricsClient {
 			type: "counter",
 			values: [],
 		};
+		observationSink?.capture([methodCount]);
 
-		for (const accountData of result.data?.viewer?.accounts ?? []) {
-		for (const zoneData of accountData.zones ?? []) {
+		for (const zoneData of (result.data?.viewer?.accounts ?? []).flatMap(
+			(accountData) => accountData.zones ?? [],
+		)) {
 			const zoneName = findZoneName(zoneData.zoneTag, zones);
 
 			for (const group of zoneData.httpRequestsAdaptiveGroups ?? []) {
@@ -2406,7 +2648,6 @@ export class CloudflareMetricsClient {
 					});
 				}
 			}
-		}
 		}
 
 		return methodCount.values.length > 0 ? [methodCount] : [];
@@ -2426,6 +2667,7 @@ export class CloudflareMetricsClient {
 		zoneIds: string[],
 		zones: Zone[],
 		timeRange: TimeRange,
+		observationSink?: ColumnarObservationSink,
 	): Promise<MetricDefinition[]> {
 		const result = await this.gql.query(HealthCheckMetricsQuery, {
 			accountID: accountId,
@@ -2479,9 +2721,18 @@ export class CloudflareMetricsClient {
 			type: "gauge",
 			values: [],
 		};
+		observationSink?.capture([
+			eventsOrigin,
+			eventsAvg,
+			healthCheckRtt,
+			healthCheckTtfb,
+			healthCheckTcpConn,
+			healthCheckTlsHandshake,
+		]);
 
-		for (const accountData of result.data?.viewer?.accounts ?? []) {
-		for (const zoneData of accountData.zones ?? []) {
+		for (const zoneData of (result.data?.viewer?.accounts ?? []).flatMap(
+			(accountData) => accountData.zones ?? [],
+		)) {
 			const zoneName = findZoneName(zoneData.zoneTag, zones);
 			let totalEvents = 0;
 			let groupCount = 0;
@@ -2550,7 +2801,6 @@ export class CloudflareMetricsClient {
 				});
 			}
 		}
-		}
 
 		return [
 			eventsOrigin,
@@ -2580,6 +2830,7 @@ export class CloudflareMetricsClient {
 		anchor: TimeRange,
 		allowlist: ReadonlySet<string> | undefined,
 		hostMetricsDelaySeconds?: number,
+		observationSink?: ColumnarObservationSink,
 	): Promise<MetricDefinition[]> {
 		if (!allowlist || allowlist.size === 0) {
 			this.logger.debug("Hostname metrics skipped: empty allowlist");
@@ -2680,9 +2931,21 @@ export class CloudflareMetricsClient {
 			type: "gauge",
 			values: [],
 		};
+		observationSink?.capture([
+			hostnameRequests,
+			hostnameStatus,
+			hostnameCacheStatus,
+			hostnameEdgeTtfb,
+			hostnameEdgeTtfbP50,
+			hostnameEdgeTtfbP95,
+			hostnameOriginDuration,
+			hostnameOriginDurationP50,
+			hostnameOriginDurationP95,
+		]);
 
-		for (const accountData of result.data?.viewer?.accounts ?? []) {
-		for (const zoneData of accountData.zones ?? []) {
+		for (const zoneData of (result.data?.viewer?.accounts ?? []).flatMap(
+			(accountData) => accountData.zones ?? [],
+		)) {
 			const zoneName = findZoneName(zoneData.zoneTag, zones);
 
 			// Total requests per host
@@ -2810,7 +3073,6 @@ export class CloudflareMetricsClient {
 				}
 			}
 		}
-		}
 
 		// Log allowlisted hosts with no traffic at debug level
 		const seenHosts = new Set<string>();
@@ -2856,6 +3118,8 @@ export class CloudflareMetricsClient {
 		zoneIds: string[],
 		zones: Zone[],
 		timeRange: TimeRange,
+		packedMetricStorage: boolean,
+		observationSink?: ColumnarObservationSink,
 	): Promise<MetricDefinition[]> {
 		const result = await this.gql.query(LoadBalancerMetricsQuery, {
 			accountID: accountId,
@@ -2863,6 +3127,7 @@ export class CloudflareMetricsClient {
 			mintime: timeRange.mintime,
 			maxtime: timeRange.maxtime,
 			limit: this.config.queryLimit,
+			packed: packedMetricStorage,
 		});
 
 		if (result.error) {
@@ -2903,12 +3168,20 @@ export class CloudflareMetricsClient {
 			type: "gauge",
 			values: [],
 		};
+		observationSink?.capture([
+			poolHealth,
+			poolRequests,
+			poolRtt,
+			steeringPolicyInfo,
+			originsSelectedCount,
+		]);
 
 		// Track seen policies to dedupe info metric
 		const seenPolicies = new Set<string>();
 
-		for (const accountData of result.data?.viewer?.accounts ?? []) {
-		for (const zoneData of accountData.zones ?? []) {
+		for (const zoneData of (result.data?.viewer?.accounts ?? []).flatMap(
+			(accountData) => accountData.zones ?? [],
+		)) {
 			const zoneName = findZoneName(zoneData.zoneTag, zones);
 
 			// Pool requests, RTT, steering policy, origins selected from groups
@@ -2966,7 +3239,80 @@ export class CloudflareMetricsClient {
 						});
 					}
 				}
-		}
+			}
+
+			for (const group of zoneData.poolRequests ?? []) {
+				const dim = group.dimensions;
+				if (group.count != null && group.count > 0) {
+					poolRequests.values.push({
+						labels: {
+							zone: zoneName,
+							lb_name: dim?.lbName ?? "",
+							pool_name: dim?.selectedPoolName ?? "",
+							origin_name: dim?.selectedOriginName ?? "",
+						},
+						value: group.count,
+					});
+				}
+			}
+
+			for (const group of zoneData.poolRtt ?? []) {
+				const dim = group.dimensions;
+				if (
+					group.count != null &&
+					group.count > 0 &&
+					dim?.selectedPoolAvgRttMs != null &&
+					dim.selectedPoolAvgRttMs > 0
+				) {
+					poolRtt.values.push({
+						labels: {
+							zone: zoneName,
+							lb_name: dim.lbName ?? "",
+							pool_name: dim.selectedPoolName ?? "",
+						},
+						value: dim.selectedPoolAvgRttMs / 1000,
+					});
+				}
+			}
+
+			for (const group of zoneData.originsSelected ?? []) {
+				const dim = group.dimensions;
+				if (
+					group.count != null &&
+					group.count > 0 &&
+					dim?.numberOriginsSelected != null
+				) {
+					originsSelectedCount.values.push({
+						labels: {
+							zone: zoneName,
+							lb_name: dim.lbName ?? "",
+							pool_name: dim.selectedPoolName ?? "",
+						},
+						value: dim.numberOriginsSelected,
+					});
+				}
+			}
+
+			for (const group of zoneData.steeringPolicies ?? []) {
+				const dim = group.dimensions;
+				const lbName = dim?.lbName ?? "";
+				const policyKey = `${zoneName}\x00${lbName}`;
+				if (
+					group.count != null &&
+					group.count > 0 &&
+					dim?.steeringPolicy &&
+					!seenPolicies.has(policyKey)
+				) {
+					seenPolicies.add(policyKey);
+					steeringPolicyInfo.values.push({
+						labels: {
+							zone: zoneName,
+							lb_name: lbName,
+							policy: dim.steeringPolicy,
+						},
+						value: 1,
+					});
+				}
 			}
 
 			// Pool health from adaptive
@@ -3007,6 +3353,7 @@ export class CloudflareMetricsClient {
 		zoneIds: string[],
 		zones: Zone[],
 		timeRange: TimeRange,
+		observationSink?: ColumnarObservationSink,
 	): Promise<MetricDefinition[]> {
 		const result = await this.gql.query(LogpushZoneMetricsQuery, {
 			accountID: accountId,
@@ -3017,7 +3364,7 @@ export class CloudflareMetricsClient {
 		});
 
 		if (result.error) {
-			throw new Error(`GraphQL error: ${result.error.message}`);
+			throw graphQLQueryError("logpush-zone", result.error);
 		}
 
 		const failedJobs: MetricDefinition = {
@@ -3026,9 +3373,11 @@ export class CloudflareMetricsClient {
 			type: "counter",
 			values: [],
 		};
+		observationSink?.capture([failedJobs]);
 
-		for (const accountData of result.data?.viewer?.accounts ?? []) {
-		for (const zoneData of accountData.zones ?? []) {
+		for (const zoneData of (result.data?.viewer?.accounts ?? []).flatMap(
+			(accountData) => accountData.zones ?? [],
+		)) {
 			const zoneName = findZoneName(zoneData.zoneTag, zones);
 
 			for (const group of zoneData.logpushHealthAdaptiveGroups ?? []) {
@@ -3044,7 +3393,6 @@ export class CloudflareMetricsClient {
 					});
 				}
 			}
-		}
 		}
 
 		return failedJobs.values.length > 0 ? [failedJobs] : [];
@@ -3064,6 +3412,7 @@ export class CloudflareMetricsClient {
 		zoneIds: string[],
 		zones: Zone[],
 		timeRange: TimeRange,
+		observationSink?: ColumnarObservationSink,
 	): Promise<MetricDefinition[]> {
 		const result = await this.gql.query(OriginStatusMetricsQuery, {
 			accountID: accountId,
@@ -3074,7 +3423,7 @@ export class CloudflareMetricsClient {
 		});
 
 		if (result.error) {
-			throw new Error(`GraphQL error: ${result.error.message}`);
+			throw graphQLQueryError("origin-status-metrics", result.error);
 		}
 
 		const originStatusCountryHost: MetricDefinition = {
@@ -3083,9 +3432,11 @@ export class CloudflareMetricsClient {
 			type: "counter",
 			values: [],
 		};
+		observationSink?.capture([originStatusCountryHost]);
 
-		for (const accountData of result.data?.viewer?.accounts ?? []) {
-		for (const zoneData of accountData.zones ?? []) {
+		for (const zoneData of (result.data?.viewer?.accounts ?? []).flatMap(
+			(accountData) => accountData.zones ?? [],
+		)) {
 			const zoneName = findZoneName(zoneData.zoneTag, zones);
 
 			for (const group of zoneData.httpRequestsAdaptiveGroups ?? []) {
@@ -3103,7 +3454,6 @@ export class CloudflareMetricsClient {
 					});
 				}
 			}
-		}
 		}
 
 		return originStatusCountryHost.values.length > 0
@@ -3125,6 +3475,7 @@ export class CloudflareMetricsClient {
 		zoneIds: string[],
 		zones: Zone[],
 		timeRange: TimeRange,
+		observationSink?: ColumnarObservationSink,
 	): Promise<MetricDefinition[]> {
 		const result = await this.gql.query(CacheMissMetricsQuery, {
 			accountID: accountId,
@@ -3148,9 +3499,11 @@ export class CloudflareMetricsClient {
 			type: "gauge",
 			values: [],
 		};
+		observationSink?.capture([cacheMissDuration]);
 
-		for (const accountData of result.data?.viewer?.accounts ?? []) {
-		for (const zoneData of accountData.zones ?? []) {
+		for (const zoneData of (result.data?.viewer?.accounts ?? []).flatMap(
+			(accountData) => accountData.zones ?? [],
+		)) {
 			const zoneName = findZoneName(zoneData.zoneTag, zones);
 
 			for (const group of zoneData.httpRequestsAdaptiveGroups ?? []) {
@@ -3169,7 +3522,6 @@ export class CloudflareMetricsClient {
 					});
 				}
 			}
-		}
 		}
 
 		return cacheMissDuration.values.length > 0 ? [cacheMissDuration] : [];
@@ -3258,13 +3610,17 @@ export class CloudflareMetricsClient {
 	 * @param zones Zone metadata.
 	 * @returns LB weight metrics.
 	 */
-	private async getLbWeightMetrics(zones: Zone[]): Promise<MetricDefinition[]> {
+	private async getLbWeightMetrics(
+		zones: Zone[],
+		observationSink?: ColumnarObservationSink,
+	): Promise<MetricDefinition[]> {
 		const originWeight: MetricDefinition = {
 			name: "cloudflare_zone_lb_origin_weight",
 			help: "Load balancer origin weight (0-1 normalized)",
 			type: "gauge",
 			values: [],
 		};
+		observationSink?.capture([originWeight]);
 
 		for (const zone of zones) {
 			const lbConfigs = await this.getLoadBalancerConfigs(
@@ -3302,6 +3658,7 @@ export class CloudflareMetricsClient {
 	 */
 	private async getSSLCertificateMetrics(
 		zones: Zone[],
+		observationSink?: ColumnarObservationSink,
 	): Promise<MetricDefinition[]> {
 		const certStatus: MetricDefinition = {
 			name: "cloudflare_zone_certificate_validation_status",
@@ -3309,6 +3666,7 @@ export class CloudflareMetricsClient {
 			type: "gauge",
 			values: [],
 		};
+		observationSink?.capture([certStatus]);
 
 		// Fetch all certs in parallel via DataLoader batching
 		const certsResults = await Promise.all(

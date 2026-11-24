@@ -357,6 +357,41 @@ export const ColoMetricsQuery = graphql(`
   }
 `);
 
+export const ColoMetricsPackedStorageQuery = graphql(`
+  query ColoMetricsPackedStorage(
+    $accountID: string!
+    $zoneIDs: [string!]
+    $mintime: Time!
+    $maxtime: Time!
+    $limit: uint64!
+  ) {
+    viewer {
+      accounts(filter: { accountTag: $accountID }) {
+        zones(filter: { zoneTag_in: $zoneIDs }) {
+          zoneTag
+          httpRequestsAdaptiveGroups(
+            limit: $limit
+            filter: { datetime_geq: $mintime, datetime_lt: $maxtime }
+          ) {
+            count
+            avg {
+              sampleInterval
+            }
+            dimensions {
+              clientRequestHTTPHost
+              coloCode
+            }
+            sum {
+              edgeResponseBytes
+              visits
+            }
+          }
+        }
+      }
+    }
+  }
+`);
+
 export const ColoErrorMetricsQuery = graphql(`
   query ColoErrorMetrics(
     $accountID: string!
@@ -442,6 +477,7 @@ export const LoadBalancerMetricsQuery = graphql(`
     $mintime: Time!
     $maxtime: Time!
     $limit: uint64!
+    $packed: Boolean!
   ) {
     viewer {
       accounts(filter: { accountTag: $accountID }) {
@@ -450,7 +486,7 @@ export const LoadBalancerMetricsQuery = graphql(`
           loadBalancingRequestsAdaptiveGroups(
             filter: { datetime_geq: $mintime, datetime_lt: $maxtime }
             limit: $limit
-          ) {
+          ) @skip(if: $packed) {
             count
             dimensions {
               lbName
@@ -462,6 +498,49 @@ export const LoadBalancerMetricsQuery = graphql(`
               selectedPoolHealthy
               steeringPolicy
               numberOriginsSelected
+            }
+          }
+          poolRequests: loadBalancingRequestsAdaptiveGroups(
+            filter: { datetime_geq: $mintime, datetime_lt: $maxtime }
+            limit: $limit
+          ) @include(if: $packed) {
+            count
+            dimensions {
+              lbName
+              selectedPoolName
+              selectedOriginName
+            }
+          }
+          poolRtt: loadBalancingRequestsAdaptiveGroups(
+            filter: { datetime_geq: $mintime, datetime_lt: $maxtime }
+            limit: $limit
+          ) @include(if: $packed) {
+            count
+            dimensions {
+              lbName
+              selectedPoolName
+              selectedPoolAvgRttMs
+            }
+          }
+          originsSelected: loadBalancingRequestsAdaptiveGroups(
+            filter: { datetime_geq: $mintime, datetime_lt: $maxtime }
+            limit: $limit
+          ) @include(if: $packed) {
+            count
+            dimensions {
+              lbName
+              selectedPoolName
+              numberOriginsSelected
+            }
+          }
+          steeringPolicies: loadBalancingRequestsAdaptiveGroups(
+            filter: { datetime_geq: $mintime, datetime_lt: $maxtime }
+            limit: $limit
+          ) @include(if: $packed) {
+            count
+            dimensions {
+              lbName
+              steeringPolicy
             }
           }
           loadBalancingRequestsAdaptive(
@@ -570,7 +649,6 @@ export const MagicTransitMetricsQuery = graphql(`
             tunnelState
           }
           dimensions {
-            active
             datetime
             edgeColoCity
             edgeColoCountry
@@ -1013,6 +1091,31 @@ export const StreamLiveInputsQuery = graphql(`
           }
           dimensions {
             eventCode
+          }
+        }
+      }
+    }
+  }
+`);
+
+export const TurnstileMetricsQuery = graphql(`
+  query TurnstileMetrics(
+    $accountID: string!
+    $limit: uint64!
+    $filter: AccountTurnstileAdaptiveGroupsFilter_InputObject!
+  ) {
+    viewer {
+      accounts(filter: { accountTag: $accountID }) {
+        turnstileAdaptiveGroups(
+          limit: $limit
+          filter: $filter
+          orderBy: [siteKey_ASC, action_ASC, eventType_ASC]
+        ) {
+          count
+          dimensions {
+            siteKey
+            action
+            eventType
           }
         }
       }

@@ -4,12 +4,102 @@ import { extractErrorInfo } from "../lib/errors";
 import { filterAccountsByIds, parseCommaSeparated } from "../lib/filters";
 import { createLogger, type Logger } from "../lib/logger";
 import type { MetricDefinition } from "../lib/metrics";
-import { serializeToPrometheus } from "../lib/prometheus";
+import { PACKED_METRIC_QUERIES } from "../lib/packed-metric-state";
+import {
+	createPrometheusStream,
+	serializeToPrometheus,
+} from "../lib/prometheus";
 import { getConfig, type ResolvedConfig } from "../lib/runtime-config";
 import type { Account } from "../lib/types";
 import { AccountMetricCoordinator } from "./AccountMetricCoordinator";
 
 const STATE_KEY = "state";
+const PROMETHEUS_CHUNK_CHARS = 16 * 1024;
+
+function zoneCount(response: Response, name: string): number {
+	const header = response.headers.get(name);
+	if (header === null) {
+		throw new Error(`Missing account metric stream header: ${name}`);
+	}
+	const value = Number(header);
+	if (!Number.isInteger(value) || value < 0) {
+		throw new Error(`Invalid account metric stream header: ${name}`);
+	}
+	return value;
+}
+
+async function* deduplicateMetricMetadata(
+	body: ReadableStream<Uint8Array>,
+	emitted: Set<string>,
+	logger: Logger,
+): AsyncGenerator<string, void> {
+	const reader = body.getReader();
+	const decoder = new TextDecoder();
+	let pending = "";
+	let buffer = "";
+	let completed = false;
+	const metadataKey = (line: string) => {
+		const metadata = /^# (HELP|TYPE) (\S+)/.exec(line);
+		return metadata === null ? undefined : `${metadata[1]}:${metadata[2]}`;
+	};
+	try {
+		while (true) {
+			const next = await reader.read();
+			if (next.done) {
+				completed = true;
+				break;
+			}
+			pending += decoder.decode(next.value, { stream: true });
+			let lineEnd = pending.indexOf("\n");
+			while (lineEnd >= 0) {
+				const line = pending.slice(0, lineEnd + 1);
+				pending = pending.slice(lineEnd + 1);
+				const key = metadataKey(line);
+				if (key !== undefined) {
+					if (buffer.length > 0) yield buffer;
+					buffer = "";
+					if (!emitted.has(key)) {
+						emitted.add(key);
+						yield line;
+					}
+				} else {
+					buffer += line;
+					if (buffer.length >= PROMETHEUS_CHUNK_CHARS) {
+						yield buffer;
+						buffer = "";
+					}
+				}
+				lineEnd = pending.indexOf("\n");
+			}
+		}
+		pending += decoder.decode();
+		if (pending.length > 0) {
+			const key = metadataKey(pending);
+			if (key === undefined) buffer += pending;
+			else if (!emitted.has(key)) {
+				if (buffer.length > 0) yield buffer;
+				buffer = "";
+				emitted.add(key);
+				yield pending;
+			}
+		}
+		if (buffer.length > 0) yield buffer;
+	} finally {
+		try {
+			if (!completed) {
+				try {
+					await reader.cancel();
+				} catch (error) {
+					logger.debug("Failed to cancel streamed account metrics", {
+						error: error instanceof Error ? error.message : String(error),
+					});
+				}
+			}
+		} finally {
+			reader.releaseLock();
+		}
+	}
+}
 
 type MetricCoordinatorState = {
 	identifier: string;
@@ -136,12 +226,23 @@ export class MetricCoordinator extends DurableObject<Env> {
 		return accounts;
 	}
 
-	/**
-	 * Collects metrics from all accounts and serializes to Prometheus format.
-	 *
-	 * @returns Prometheus-formatted metrics string.
-	 */
-	async export(): Promise<string> {
+	override async fetch(request: Request): Promise<Response> {
+		const url = new URL(request.url);
+		if (url.pathname !== "/export") {
+			return new Response("Not Found", { status: 404 });
+		}
+
+		try {
+			return await this.exportResponse();
+		} catch (error) {
+			const message = error instanceof Error ? error.message : String(error);
+			return new Response(`Error collecting metrics: ${message}`, {
+				status: 500,
+			});
+		}
+	}
+
+	private async exportResponse(): Promise<Response> {
 		const config = await getConfig(this.env);
 		const logger = this.createLogger(config);
 
@@ -150,84 +251,136 @@ export class MetricCoordinator extends DurableObject<Env> {
 
 		if (accounts.length === 0) {
 			logger.warn("No accounts found");
-			return "";
+			return new Response("", {
+				headers: { "Content-Type": "text/plain; charset=utf-8" },
+			});
 		}
 
-		logger.info("Exporting metrics", { account_count: accounts.length });
+		logger.info("Streaming metrics", { account_count: accounts.length });
 
-		// Track errors by account and error code
+		return new Response(this.createExportStream(accounts, config, logger), {
+			headers: { "Content-Type": "text/plain; charset=utf-8" },
+		});
+	}
+
+	private createExportStream(
+		accounts: readonly Account[],
+		config: ResolvedConfig,
+		logger: Logger,
+	): ReadableStream<Uint8Array> {
+		return createPrometheusStream(this.exportChunks(accounts, config, logger));
+	}
+
+	private async *exportChunks(
+		accounts: readonly Account[],
+		config: ResolvedConfig,
+		logger: Logger,
+	): AsyncGenerator<string, void> {
+		const metricsDenylist = parseCommaSeparated(config.metricsDenylist);
+		const excludeLabels = config.excludeHost ? new Set(["host"]) : undefined;
+		const packedMetricQueries = config.packedMetricStorage
+			? PACKED_METRIC_QUERIES
+			: [];
+
 		const errorsByAccount: Map<string, { code: string; count: number }[]> =
 			new Map();
-
-		const results = await Promise.all(
-			accounts.map(async (account) => {
-				try {
-					const coordinator = await AccountMetricCoordinator.get(
-						account.id,
-						account.name,
-						this.env,
-					);
-					return await coordinator.export();
-				} catch (error) {
-					const info = extractErrorInfo(error);
-					logger.error("Failed to export account", {
-						account_id: account.id,
-						error_code: info.code,
-						error: info.message,
-						...(info.stack && { stack: info.stack }),
-					});
-
-					// Track error for metrics
-					const accountErrors = errorsByAccount.get(account.id) ?? [];
-					const existing = accountErrors.find((e) => e.code === info.code);
-					if (existing) {
-						existing.count++;
-					} else {
-						accountErrors.push({ code: info.code, count: 1 });
-					}
-					errorsByAccount.set(account.id, accountErrors);
-
-					return {
-						metrics: [],
-						zoneCounts: {
-							total: 0,
-							filtered: 0,
-							processed: 0,
-							skippedFreeTier: 0,
-						},
-					};
-				}
-			}),
-		);
-
-		// Aggregate stats
 		const zoneCounts = {
 			total: 0,
 			filtered: 0,
 			processed: 0,
 			skippedFreeTier: 0,
 		};
-		const allMetrics: MetricDefinition[] = [];
-		for (const result of results) {
-			allMetrics.push(...result.metrics);
-			zoneCounts.total += result.zoneCounts.total;
-			zoneCounts.filtered += result.zoneCounts.filtered;
-			zoneCounts.processed += result.zoneCounts.processed;
-			zoneCounts.skippedFreeTier += result.zoneCounts.skippedFreeTier;
+		const accountStreams: {
+			account: Account;
+			response: Response;
+		}[] = [];
+
+		for (const account of accounts) {
+			try {
+				const coordinator = await AccountMetricCoordinator.get(
+					account.id,
+					account.name,
+					this.env,
+				);
+				// Resolve the storage mode once per scrape so every account serializes
+				// packed metrics the same way; mixed modes would duplicate HELP/TYPE lines.
+				const response = await coordinator.exportForPrometheus({
+					packedMetricQueries,
+				});
+				accountStreams.push({ account, response });
+				zoneCounts.total += zoneCount(response, "X-Metrics-Zones-Total");
+				zoneCounts.filtered += zoneCount(response, "X-Metrics-Zones-Filtered");
+				zoneCounts.processed += zoneCount(
+					response,
+					"X-Metrics-Zones-Processed",
+				);
+				zoneCounts.skippedFreeTier += zoneCount(
+					response,
+					"X-Metrics-Zones-Skipped-Free-Tier",
+				);
+			} catch (error) {
+				const info = extractErrorInfo(error);
+				logger.error("Failed to export account", {
+					account_id: account.id,
+					error_code: info.code,
+					error: info.message,
+					...(info.stack && { stack: info.stack }),
+				});
+
+				const accountErrors = errorsByAccount.get(account.id) ?? [];
+				const existing = accountErrors.find((e) => e.code === info.code);
+				if (existing) {
+					existing.count++;
+				} else {
+					accountErrors.push({ code: info.code, count: 1 });
+				}
+				errorsByAccount.set(account.id, accountErrors);
+			}
 		}
 
-		// Add exporter info metrics
-		const exporterMetrics = this.buildExporterInfoMetrics(
-			accounts.length,
-			zoneCounts,
-			errorsByAccount,
-		);
-
-		const metricsDenylist = parseCommaSeparated(config.metricsDenylist);
-		return serializeToPrometheus([...exporterMetrics, ...allMetrics], {
-			denylist: metricsDenylist,
-			excludeLabels: config.excludeHost ? new Set(["host"]) : undefined,
-		});
+		try {
+			const remaining = serializeToPrometheus(
+				this.buildExporterInfoMetrics(
+					accounts.length,
+					zoneCounts,
+					errorsByAccount,
+				),
+				{
+					denylist: metricsDenylist,
+					excludeLabels,
+				},
+			);
+			if (remaining.length > 0) yield `${remaining}\n`;
+			const emittedMetadata = new Set<string>();
+			for (const { account, response } of accountStreams) {
+				if (response.body === null) continue;
+				try {
+					yield* deduplicateMetricMetadata(
+						response.body,
+						emittedMetadata,
+						logger,
+					);
+				} catch (error) {
+					logger.error("Failed to stream account metrics", {
+						account_id: account.id,
+						error: error instanceof Error ? error.message : String(error),
+					});
+				}
+			}
+		} finally {
+			for (const { account, response } of accountStreams) {
+				if (response.body === null || response.body.locked) continue;
+				try {
+					await response.body.cancel();
+				} catch (error) {
+					logger.debug("Failed to cancel account metric stream", {
+						account_id: account.id,
+						error: error instanceof Error ? error.message : String(error),
+					});
+				}
+			}
+		}
+		logger.info("Metrics streamed successfully");
 	}
 
 	/**

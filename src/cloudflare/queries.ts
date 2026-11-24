@@ -15,6 +15,8 @@ export const MetricQueryNameSchema = z.enum([
 	"network-analytics",
 	"stream-video-playback",
 	"stream-live-inputs",
+	"images",
+	"turnstile",
 	// Zone-level
 	"http-metrics",
 	"adaptive-metrics",
@@ -51,6 +53,8 @@ export const ACCOUNT_LEVEL_QUERIES = [
 	"network-analytics",
 	"stream-video-playback",
 	"stream-live-inputs",
+	"images",
+	"turnstile",
 ] as const;
 
 /**
@@ -116,6 +120,7 @@ export const FREE_TIER_QUERIES = [
 	"magic-transit-traffic",
 	"magic-firewall-samples",
 	"network-analytics",
+	"turnstile",
 ] as const;
 
 /**
