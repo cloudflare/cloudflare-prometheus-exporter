@@ -25,13 +25,17 @@ describe("metric-columnar-v1 integration", () => {
 				return HttpResponse.json({
 					data: {
 						viewer: {
-							zones: [
+							accounts: [
 								{
-									zoneTag: zone.id,
-									httpRequests1mGroups: [
-										{ sum: { requests: 5, cachedRequests: 2 } },
+									zones: [
+										{
+											zoneTag: zone.id,
+											httpRequests1mGroups: [
+												{ sum: { requests: 5, cachedRequests: 2 } },
+											],
+											firewallEventsAdaptiveGroups: [],
+										},
 									],
-									firewallEventsAdaptiveGroups: [],
 								},
 							],
 						},
@@ -115,30 +119,34 @@ describe("metric-columnar-v1 integration", () => {
 				HttpResponse.json({
 					data: {
 						viewer: {
-							zones: [
+							accounts: [
 								{
-									zoneTag: zone.id,
-									hostRequests: [
+									zones: [
 										{
-											dimensions: { clientRequestHTTPHost: "EXAMPLE.COM" },
-											count: 12,
-										},
-									],
-									hostStatus: [],
-									hostCache: [],
-									hostLatency: [
-										{
-											dimensions: { clientRequestHTTPHost: "EXAMPLE.COM" },
-											avg: {
-												edgeTimeToFirstByteMs: 100,
-												originResponseDurationMs: 200,
-											},
-											quantiles: {
-												edgeTimeToFirstByteMsP50: 80,
-												edgeTimeToFirstByteMsP95: 180,
-												originResponseDurationMsP50: 150,
-												originResponseDurationMsP95: 350,
-											},
+											zoneTag: zone.id,
+											hostRequests: [
+												{
+													dimensions: { clientRequestHTTPHost: "EXAMPLE.COM" },
+													count: 12,
+												},
+											],
+											hostStatus: [],
+											hostCache: [],
+											hostLatency: [
+												{
+													dimensions: { clientRequestHTTPHost: "EXAMPLE.COM" },
+													avg: {
+														edgeTimeToFirstByteMs: 100,
+														originResponseDurationMs: 200,
+													},
+													quantiles: {
+														edgeTimeToFirstByteMsP50: 80,
+														edgeTimeToFirstByteMsP95: 180,
+														originResponseDurationMsP50: 150,
+														originResponseDurationMsP95: 350,
+													},
+												},
+											],
 										},
 									],
 								},
@@ -177,52 +185,56 @@ describe("metric-columnar-v1 integration", () => {
 				HttpResponse.json({
 					data: {
 						viewer: {
-							zones: [
+							accounts: [
 								{
-									zoneTag: zone.id,
-									poolRequests: [
+									zones: [
 										{
-											count: 7,
-											dimensions: {
-												lbName: "lb",
-												selectedPoolName: "pool",
-												selectedOriginName: "origin",
-											},
-										},
-									],
-									poolRtt: [
-										{
-											count: 7,
-											dimensions: {
-												lbName: "lb",
-												selectedPoolName: "pool",
-												selectedPoolAvgRttMs: 250,
-											},
-										},
-									],
-									originsSelected: [
-										{
-											count: 7,
-											dimensions: {
-												lbName: "lb",
-												selectedPoolName: "pool",
-												numberOriginsSelected: 2,
-											},
-										},
-									],
-									steeringPolicies: [
-										{
-											count: 7,
-											dimensions: {
-												lbName: "lb",
-												steeringPolicy: "dynamic_latency",
-											},
-										},
-									],
-									loadBalancingRequestsAdaptive: [
-										{
-											lbName: "lb",
-											pools: [{ poolName: "pool", healthy: true }],
+											zoneTag: zone.id,
+											poolRequests: [
+												{
+													count: 7,
+													dimensions: {
+														lbName: "lb",
+														selectedPoolName: "pool",
+														selectedOriginName: "origin",
+													},
+												},
+											],
+											poolRtt: [
+												{
+													count: 7,
+													dimensions: {
+														lbName: "lb",
+														selectedPoolName: "pool",
+														selectedPoolAvgRttMs: 250,
+													},
+												},
+											],
+											originsSelected: [
+												{
+													count: 7,
+													dimensions: {
+														lbName: "lb",
+														selectedPoolName: "pool",
+														numberOriginsSelected: 2,
+													},
+												},
+											],
+											steeringPolicies: [
+												{
+													count: 7,
+													dimensions: {
+														lbName: "lb",
+														steeringPolicy: "dynamic_latency",
+													},
+												},
+											],
+											loadBalancingRequestsAdaptive: [
+												{
+													lbName: "lb",
+													pools: [{ poolName: "pool", healthy: true }],
+												},
+											],
 										},
 									],
 								},

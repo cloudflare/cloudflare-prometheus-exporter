@@ -533,6 +533,7 @@ export class MetricExporter extends DurableObject<Env> {
 								? []
 								: await client.getPackedZoneMetrics(
 										state.queryName,
+										state.accountId,
 										[zoneMetadata.id],
 										[zoneMetadata],
 										{},
@@ -770,6 +771,7 @@ export class MetricExporter extends DurableObject<Env> {
 						metrics: [],
 						packedMetrics: await client.getPackedZoneMetrics(
 							queryName,
+							accountId,
 							zoneIds,
 							zonesToQuery,
 							firewallRules,
@@ -786,6 +788,7 @@ export class MetricExporter extends DurableObject<Env> {
 				return {
 					metrics: await client.getZoneMetrics(
 						queryName,
+						accountId,
 						zoneIds,
 						zonesToQuery,
 						firewallRules,
@@ -837,6 +840,7 @@ export class MetricExporter extends DurableObject<Env> {
 							...(packedMetrics ?? []),
 							...(await client.getPackedZoneMetrics(
 								queryName,
+								accountId,
 								chunkIds,
 								chunkZones,
 								firewallRules,
@@ -850,6 +854,7 @@ export class MetricExporter extends DurableObject<Env> {
 						chunkResults.push(
 							await client.getZoneMetrics(
 								queryName,
+								accountId,
 								chunkIds,
 								chunkZones,
 								firewallRules,

@@ -46,18 +46,31 @@ export function mockBatchedZoneGroups(
 		http.post(CLOUDFLARE_GQL_URL, async ({ request }) => {
 			requests++;
 			const { variables } = z
-				.object({ variables: z.object({ zoneIDs: z.array(z.string()) }) })
+				.object({
+					variables: z.object({
+						accountID: z.string(),
+						zoneIDs: z.array(z.string()),
+					}),
+				})
 				.parse(await request.json());
 			const requestedZones = new Set(variables.zoneIDs);
 			return HttpResponse.json({
 				data: {
 					viewer: {
-						zones: zones
-							.filter((zone) => requestedZones.has(zone.id))
-							.map((zone) => ({
-								zoneTag: zone.id,
-								[groupField]: groups,
-							})),
+						accounts: [
+							{
+								zones: zones
+									.filter(
+										(zone) =>
+											zone.account.id === variables.accountID &&
+											requestedZones.has(zone.id),
+									)
+									.map((zone) => ({
+										zoneTag: zone.id,
+										[groupField]: groups,
+									})),
+							},
+						],
 					},
 				},
 			});

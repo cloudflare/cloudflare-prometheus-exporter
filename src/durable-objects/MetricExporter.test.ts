@@ -216,7 +216,7 @@ describe("MetricExporter state recovery", () => {
 				),
 			)
 			.mockResolvedValue(
-				new Response(JSON.stringify({ data: { viewer: { zones: [] } } }), {
+				new Response(JSON.stringify({ data: { viewer: { accounts: [] } } }), {
 					headers: { "content-type": "application/json" },
 				}),
 			);
@@ -428,19 +428,23 @@ async function createColoHarness(zoneCount = 1) {
 			JSON.stringify({
 				data: {
 					viewer: {
-						zones: zones
-							.filter((zone) => requested.has(zone.id))
-							.map((zone) => ({
-								zoneTag: zone.id,
-								httpRequestsAdaptiveGroups: observations.map((row) => ({
-									dimensions: {
-										coloCode: "SJC",
-										clientRequestHTTPHost: row.host,
-									},
-									count: row.requests,
-									sum: { visits: row.visits, edgeResponseBytes: row.bytes },
-								})),
-							})),
+						accounts: [
+							{
+								zones: zones
+									.filter((zone) => requested.has(zone.id))
+									.map((zone) => ({
+										zoneTag: zone.id,
+										httpRequestsAdaptiveGroups: observations.map((row) => ({
+											dimensions: {
+												coloCode: "SJC",
+												clientRequestHTTPHost: row.host,
+											},
+											count: row.requests,
+											sum: { visits: row.visits, edgeResponseBytes: row.bytes },
+										})),
+									})),
+							},
+						],
 					},
 				},
 			}),
@@ -633,13 +637,17 @@ async function createColumnarHarness(packed: boolean) {
 			JSON.stringify({
 				data: {
 					viewer: {
-						zones: [
+						accounts: [
 							{
-								zoneTag: "zone-id",
-								httpRequestsAdaptiveGroups: [
+								zones: [
 									{
-										dimensions: { clientRequestHTTPMethodName: "GET" },
-										count: 10,
+										zoneTag: "zone-id",
+										httpRequestsAdaptiveGroups: [
+											{
+												dimensions: { clientRequestHTTPMethodName: "GET" },
+												count: 10,
+											},
+										],
 									},
 								],
 							},

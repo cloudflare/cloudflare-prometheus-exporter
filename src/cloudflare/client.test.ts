@@ -20,30 +20,47 @@ describe("CloudflareMetricsClient", () => {
 		true,
 	])("keeps HTTP metrics grouped by datetime when packed storage=%s", async (packed) => {
 		const client = createClient(async (input, init) => {
+			const request = new Request(input, init);
+			expect(request.headers.get("X-Rate-Limit-Type")).toBe("account-based");
 			const body = z
 				.object({
 					query: z.string(),
+					variables: z.object({
+						accountID: z.string(),
+						zoneIDs: z.array(z.string()),
+					}),
 				})
-				.parse(await new Request(input, init).json());
+				.parse(await request.json());
+			expect(body.variables).toEqual({
+				accountID: "account-id",
+				zoneIDs: ["zone-id"],
+			});
+			expect(body.query).toMatch(
+				/accounts\s*\(filter:\s*\{accountTag:\s*\$accountID\}\)\s*\{\s*zones/,
+			);
 			expect(body.query).toContain("datetime");
 			expect(body.query).not.toContain("@skip");
 			return Response.json({
 				data: {
 					viewer: {
-						zones: [
+						accounts: [
 							{
-								zoneTag: "zone-id",
-								httpRequests1mGroups: [
+								zones: [
 									{
-										dimensions: { datetime: "2026-01-01T00:00:00Z" },
-										sum: { requests: 1 },
-									},
-									{
-										dimensions: { datetime: "2026-01-01T00:01:00Z" },
-										sum: { requests: 2 },
+										zoneTag: "zone-id",
+										httpRequests1mGroups: [
+											{
+												dimensions: { datetime: "2026-01-01T00:00:00Z" },
+												sum: { requests: 1 },
+											},
+											{
+												dimensions: { datetime: "2026-01-01T00:01:00Z" },
+												sum: { requests: 2 },
+											},
+										],
+										firewallEventsAdaptiveGroups: [],
 									},
 								],
-								firewallEventsAdaptiveGroups: [],
 							},
 						],
 					},
@@ -53,6 +70,7 @@ describe("CloudflareMetricsClient", () => {
 
 		const metrics = await client.getZoneMetrics(
 			"http-metrics",
+			"account-id",
 			["zone-id"],
 			[
 				{
@@ -89,23 +107,27 @@ describe("CloudflareMetricsClient", () => {
 			return Response.json({
 				data: {
 					viewer: {
-						zones: [
+						accounts: [
 							{
-								zoneTag: "zone-id",
-								loadBalancingRequestsAdaptiveGroups: [
+								zones: [
 									{
-										count: 7,
-										dimensions: {
-											lbName: "lb",
-											selectedPoolName: "pool",
-											selectedOriginName: "origin",
-											selectedPoolAvgRttMs: 250,
-											numberOriginsSelected: 2,
-											steeringPolicy: "dynamic_latency",
-										},
+										zoneTag: "zone-id",
+										loadBalancingRequestsAdaptiveGroups: [
+											{
+												count: 7,
+												dimensions: {
+													lbName: "lb",
+													selectedPoolName: "pool",
+													selectedOriginName: "origin",
+													selectedPoolAvgRttMs: 250,
+													numberOriginsSelected: 2,
+													steeringPolicy: "dynamic_latency",
+												},
+											},
+										],
+										loadBalancingRequestsAdaptive: [],
 									},
 								],
-								loadBalancingRequestsAdaptive: [],
 							},
 						],
 					},
@@ -115,6 +137,7 @@ describe("CloudflareMetricsClient", () => {
 
 		const metrics = await client.getZoneMetrics(
 			"load-balancer-metrics",
+			"account-id",
 			["zone-id"],
 			[
 				{
@@ -159,10 +182,11 @@ describe("CloudflareMetricsClient", () => {
 					fields.push(node.name.value);
 				},
 			});
-			return Response.json({ data: { viewer: { zones: [] } } });
+			return Response.json({ data: { viewer: { accounts: [] } } });
 		});
 		await client.getZoneMetrics(
 			"colo-metrics",
+			"account-id",
 			["zone-id"],
 			[],
 			{},
@@ -255,21 +279,25 @@ describe("CloudflareMetricsClient", () => {
 				JSON.stringify({
 					data: {
 						viewer: {
-							zones: [
+							accounts: [
 								{
-									zoneTag: "zone-id",
-									httpRequests1mGroups: [
+									zones: [
 										{
-											sum: {
-												requests: 5,
-												responseStatusMap: [
-													{ edgeResponseStatus: 200, requests: 3 },
-													{ edgeResponseStatus: 204, requests: 2 },
-												],
-											},
+											zoneTag: "zone-id",
+											httpRequests1mGroups: [
+												{
+													sum: {
+														requests: 5,
+														responseStatusMap: [
+															{ edgeResponseStatus: 200, requests: 3 },
+															{ edgeResponseStatus: 204, requests: 2 },
+														],
+													},
+												},
+											],
+											firewallEventsAdaptiveGroups: [],
 										},
 									],
-									firewallEventsAdaptiveGroups: [],
 								},
 							],
 						},
@@ -281,6 +309,7 @@ describe("CloudflareMetricsClient", () => {
 
 		const metrics = await client.getZoneMetrics(
 			"http-metrics",
+			"account-id",
 			["zone-id"],
 			[
 				{
@@ -339,6 +368,7 @@ describe("CloudflareMetricsClient", () => {
 		await expect(
 			client.getZoneMetrics(
 				query,
+				"account-id",
 				["zone-id"],
 				[
 					{
