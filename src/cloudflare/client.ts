@@ -415,6 +415,7 @@ export class CloudflareMetricsClient {
 				issuer: z.string().optional(),
 				status: z.string().optional(),
 				expires_on: z.string().optional(),
+				signature: z.string().optional(),
 			})
 			.passthrough();
 
@@ -451,6 +452,7 @@ export class CloudflareMetricsClient {
 						status: certData.status ?? pack.status ?? "",
 						issuer: certData.issuer ?? "unknown",
 						expiresOn: certData.expires_on ?? "",
+						signatureAlgorithm: certData.signature ?? "unknown",
 						hosts: pack.hosts,
 					});
 				}
@@ -3622,6 +3624,9 @@ export class CloudflareMetricsClient {
 				certStatus.values.push({
 					labels: {
 						zone: zone.name,
+						certificate_id: cert.id,
+						hosts: cert.hosts.toSorted().join(","),
+						signature_algorithm: cert.signatureAlgorithm,
 						type: cert.type,
 						issuer: cert.issuer,
 						status: cert.status,
@@ -3664,6 +3669,9 @@ export class CloudflareMetricsClient {
 				certStatus.values.push({
 					labels: {
 						zone: zone.name,
+						certificate_id: cert.id,
+						hosts: cert.hosts.toSorted().join(","),
+						signature_algorithm: cert.signatureAlgorithm,
 						type: cert.type,
 						issuer: cert.issuer,
 						status: cert.status,
