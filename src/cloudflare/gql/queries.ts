@@ -1066,6 +1066,120 @@ export const StreamVideoPlaybackQuery = graphql(`
 `);
 
 /**
+ * R2 operations metrics (requests/bytes by operation, bucket, storage class).
+ * objectName is intentionally omitted (unbounded cardinality).
+ * responseStatusCode is queried separately (see R2OperationsErrorsQuery) to
+ * avoid multiplying series by status code on every successful request.
+ * Ordered by the full dimension tuple so callers can keyset-paginate.
+ */
+export const R2OperationsMetricsQuery = graphql(`
+  query R2OperationsMetrics(
+    $accountID: string!
+    $limit: uint64!
+    $filter: AccountR2OperationsAdaptiveGroupsFilter_InputObject!
+  ) {
+    viewer {
+      accounts(filter: { accountTag: $accountID }) {
+        r2OperationsAdaptiveGroups(
+          limit: $limit
+          filter: $filter
+          orderBy: [
+            bucketName_ASC
+            actionType_ASC
+            actionStatus_ASC
+            storageClass_ASC
+          ]
+        ) {
+          dimensions {
+            actionType
+            actionStatus
+            bucketName
+            storageClass
+          }
+          sum {
+            requests
+            responseBytes
+            responseObjectSize
+          }
+        }
+      }
+    }
+  }
+`);
+
+/**
+ * R2 operation errors by HTTP response status code.
+ * Kept separate from R2OperationsMetricsQuery so status codes only appear on
+ * the error path, mirroring colo-error-metrics. Callers add
+ * responseStatusCode_geq: 400 to the filter.
+ * Ordered by the full dimension tuple so callers can keyset-paginate.
+ */
+export const R2OperationsErrorsQuery = graphql(`
+  query R2OperationsErrors(
+    $accountID: string!
+    $limit: uint64!
+    $filter: AccountR2OperationsAdaptiveGroupsFilter_InputObject!
+  ) {
+    viewer {
+      accounts(filter: { accountTag: $accountID }) {
+        r2OperationsAdaptiveGroups(
+          limit: $limit
+          filter: $filter
+          orderBy: [bucketName_ASC, actionType_ASC, responseStatusCode_ASC]
+        ) {
+          dimensions {
+            actionType
+            bucketName
+            responseStatusCode
+          }
+          sum {
+            requests
+          }
+        }
+      }
+    }
+  }
+`);
+
+/**
+ * R2 storage metrics (object count, payload/metadata size, pending multipart
+ * uploads) by bucket and storage class.
+ * Storage values are reported periodically rather than as a per-minute
+ * counter series, so the handler queries a 24-hour lookback and keeps the
+ * most recent row per bucket/storage class.
+ */
+export const R2StorageMetricsQuery = graphql(`
+  query R2StorageMetrics(
+    $accountID: string!
+    $limit: uint64!
+    $mintime: Time!
+    $maxtime: Time!
+  ) {
+    viewer {
+      accounts(filter: { accountTag: $accountID }) {
+        r2StorageAdaptiveGroups(
+          limit: $limit
+          filter: { datetime_geq: $mintime, datetime_lt: $maxtime }
+          orderBy: [datetime_DESC]
+        ) {
+          dimensions {
+            bucketName
+            storageClass
+            datetime
+          }
+          max {
+            objectCount
+            payloadSize
+            metadataSize
+            uploadCount
+          }
+        }
+      }
+    }
+  }
+`);
+
+/**
  * Cloudflare Stream live input (input stream) metrics.
  * Groups segment counts and bit rate by event code.
  * inputId is intentionally omitted (high cardinality).

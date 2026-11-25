@@ -220,6 +220,8 @@ describe("CloudflareMetricsClient", () => {
 		"network-analytics",
 		"stream-video-playback",
 		"stream-live-inputs",
+		"r2-operations",
+		"r2-storage",
 	] as const)("surfaces %s access denial instead of reporting an empty refresh", async (query) => {
 		const fetch: typeof globalThis.fetch = async () =>
 			new Response(

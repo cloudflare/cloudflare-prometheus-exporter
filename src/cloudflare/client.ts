@@ -44,6 +44,9 @@ import {
 	MagicTransitTunnelTrafficQuery,
 	NetworkAnalyticsQuery,
 	OriginStatusMetricsQuery,
+	R2OperationsErrorsQuery,
+	R2OperationsMetricsQuery,
+	R2StorageMetricsQuery,
 	RequestMethodMetricsQuery,
 	StreamLiveInputsQuery,
 	StreamVideoPlaybackQuery,
@@ -133,6 +136,27 @@ const WORKER_METRICS = {
 	CPU_TIME: "cloudflare_worker_cpu_time_seconds",
 	DURATION: "cloudflare_worker_duration_seconds",
 } as const;
+
+// R2 metric names
+const R2_METRICS = {
+	OPERATIONS_REQUESTS: "cloudflare_r2_operations_requests_total",
+	OPERATIONS_RESPONSE_BYTES: "cloudflare_r2_operations_response_bytes_total",
+	OPERATIONS_RESPONSE_OBJECT_SIZE_BYTES:
+		"cloudflare_r2_operations_response_object_size_bytes_total",
+	OPERATIONS_ERRORS: "cloudflare_r2_operations_errors_total",
+	STORAGE_OBJECT_COUNT: "cloudflare_r2_storage_object_count",
+	STORAGE_PAYLOAD_BYTES: "cloudflare_r2_storage_payload_bytes",
+	STORAGE_METADATA_BYTES: "cloudflare_r2_storage_metadata_bytes",
+	STORAGE_PENDING_MULTIPART_UPLOADS:
+		"cloudflare_r2_storage_pending_multipart_uploads",
+} as const;
+
+// R2 storage values are reported periodically (about every 10 minutes for
+// changing buckets, at least hourly for idle ones), not as a per-minute
+// counter series, so the storage lookback is independent of the scrape
+// window. 24 hours keeps a bucket exported through long analytics delays
+// while letting a deleted bucket's values clear within a day.
+const R2_STORAGE_LOOKBACK_MS = 24 * 60 * 60 * 1000;
 // ### API Call Summary
 //
 // Most zone-level request/bandwidth/threat metrics come from **a single GraphQL call** (`HTTPMetricsQuery`). Premium metrics require separate calls.
@@ -553,6 +577,18 @@ export class CloudflareMetricsClient {
 				return this.getImagesMetrics(accountId, normalizedAccount);
 			case "turnstile":
 				return this.getTurnstileMetrics(
+					accountId,
+					normalizedAccount,
+					timeRange,
+				);
+			case "r2-operations":
+				return this.getR2OperationsMetrics(
+					accountId,
+					normalizedAccount,
+					timeRange,
+				);
+			case "r2-storage":
+				return this.getR2StorageMetrics(
 					accountId,
 					normalizedAccount,
 					timeRange,
@@ -1558,6 +1594,297 @@ export class CloudflareMetricsClient {
 		}
 
 		return [countCurrent, countAllowed].filter((m) => m.values.length > 0);
+	}
+
+	/**
+	 * Fetches R2 operations metrics (requests, response bytes, response
+	 * object size by operation/bucket/storage class) plus a separate error
+	 * breakdown by HTTP status code. Both queries keyset-paginate over their
+	 * full dimension tuple so busy accounts are not truncated at queryLimit.
+	 *
+	 * @param accountId Cloudflare account ID.
+	 * @param normalizedAccount Normalized account name for labels.
+	 * @param timeRange Query time range.
+	 * @returns R2 operations metrics.
+	 */
+	private async getR2OperationsMetrics(
+		accountId: string,
+		normalizedAccount: string,
+		timeRange: TimeRange,
+	): Promise<MetricDefinition[]> {
+		const window = {
+			datetime_geq: timeRange.mintime,
+			datetime_lt: timeRange.maxtime,
+		};
+
+		const requestsMetric: MetricDefinition = {
+			name: R2_METRICS.OPERATIONS_REQUESTS,
+			help: "Total number of R2 operations",
+			type: "counter",
+			values: [],
+		};
+		const responseBytesMetric: MetricDefinition = {
+			name: R2_METRICS.OPERATIONS_RESPONSE_BYTES,
+			help: "Total number of bytes returned by R2 operations",
+			type: "counter",
+			values: [],
+		};
+		const responseObjectSizeMetric: MetricDefinition = {
+			name: R2_METRICS.OPERATIONS_RESPONSE_OBJECT_SIZE_BYTES,
+			help: "Total size in bytes of objects returned by R2 operations",
+			type: "counter",
+			values: [],
+		};
+		const errorsMetric: MetricDefinition = {
+			name: R2_METRICS.OPERATIONS_ERRORS,
+			help: "Total number of R2 operations that returned an error status code",
+			type: "counter",
+			values: [],
+		};
+
+		const collectOperations = async () => {
+			let filter: VariablesOf<typeof R2OperationsMetricsQuery>["filter"] =
+				window;
+			while (true) {
+				const result = await this.gql.query(R2OperationsMetricsQuery, {
+					accountID: accountId,
+					filter,
+					limit: this.config.queryLimit,
+				});
+				if (result.error) {
+					throw graphQLQueryError("r2-operations", result.error);
+				}
+
+				// accountTag selects one account. Each page groups by the full label tuple.
+				const groups =
+					result.data?.viewer?.accounts?.[0]?.r2OperationsAdaptiveGroups ?? [];
+				for (const group of groups) {
+					const dims = group.dimensions;
+					if (dims == null) continue;
+					const labels = {
+						account: normalizedAccount,
+						bucket: dims.bucketName,
+						operation: dims.actionType,
+						status: dims.actionStatus,
+						storage_class: dims.storageClass,
+					};
+					requestsMetric.values.push({
+						labels,
+						value: group.sum?.requests ?? 0,
+					});
+					responseBytesMetric.values.push({
+						labels,
+						value: group.sum?.responseBytes ?? 0,
+					});
+					responseObjectSizeMetric.values.push({
+						labels,
+						value: group.sum?.responseObjectSize ?? 0,
+					});
+				}
+				if (groups.length < this.config.queryLimit) return;
+
+				const last = groups.at(-1)?.dimensions;
+				if (last == null) {
+					throw new Error("Cannot paginate R2 operations without dimensions");
+				}
+				// Advance lexicographically over the orderBy tuple.
+				filter = {
+					...window,
+					OR: [
+						{ bucketName_gt: last.bucketName },
+						{ bucketName: last.bucketName, actionType_gt: last.actionType },
+						{
+							bucketName: last.bucketName,
+							actionType: last.actionType,
+							actionStatus_gt: last.actionStatus,
+						},
+						{
+							bucketName: last.bucketName,
+							actionType: last.actionType,
+							actionStatus: last.actionStatus,
+							storageClass_gt: last.storageClass,
+						},
+					],
+				};
+			}
+		};
+
+		const collectErrors = async () => {
+			const errorWindow = { ...window, responseStatusCode_geq: 400 };
+			let filter: VariablesOf<typeof R2OperationsErrorsQuery>["filter"] =
+				errorWindow;
+			while (true) {
+				const result = await this.gql.query(R2OperationsErrorsQuery, {
+					accountID: accountId,
+					filter,
+					limit: this.config.queryLimit,
+				});
+				if (result.error) {
+					throw graphQLQueryError("r2-operations", result.error);
+				}
+
+				const groups =
+					result.data?.viewer?.accounts?.[0]?.r2OperationsAdaptiveGroups ?? [];
+				for (const group of groups) {
+					const dims = group.dimensions;
+					if (dims == null) continue;
+					errorsMetric.values.push({
+						labels: {
+							account: normalizedAccount,
+							bucket: dims.bucketName,
+							operation: dims.actionType,
+							response_status_code: String(dims.responseStatusCode),
+						},
+						value: group.sum?.requests ?? 0,
+					});
+				}
+				if (groups.length < this.config.queryLimit) return;
+
+				const last = groups.at(-1)?.dimensions;
+				if (last == null) {
+					throw new Error(
+						"Cannot paginate R2 operation errors without dimensions",
+					);
+				}
+				filter = {
+					...errorWindow,
+					OR: [
+						{ bucketName_gt: last.bucketName },
+						{ bucketName: last.bucketName, actionType_gt: last.actionType },
+						{
+							bucketName: last.bucketName,
+							actionType: last.actionType,
+							responseStatusCode_gt: last.responseStatusCode,
+						},
+					],
+				};
+			}
+		};
+
+		await Promise.all([collectOperations(), collectErrors()]);
+
+		return [
+			requestsMetric,
+			responseBytesMetric,
+			responseObjectSizeMetric,
+			errorsMetric,
+		].filter((m) => m.values.length > 0);
+	}
+
+	/**
+	 * Fetches R2 storage metrics (object count, payload/metadata size,
+	 * pending multipart uploads by bucket/storage class).
+	 *
+	 * R2 storage values are reported periodically rather than as a per-minute
+	 * counter series. Rather than using the scrape's mintime/maxtime window,
+	 * this queries a 24-hour lookback anchored on maxtime and keeps the most
+	 * recent reported value per bucket/storage class.
+	 *
+	 * @param accountId Cloudflare account ID.
+	 * @param normalizedAccount Normalized account name for labels.
+	 * @param timeRange Query time range (only maxtime is used, as the anchor
+	 *   for the lookback window).
+	 * @returns R2 storage metrics.
+	 */
+	private async getR2StorageMetrics(
+		accountId: string,
+		normalizedAccount: string,
+		timeRange: TimeRange,
+	): Promise<MetricDefinition[]> {
+		const maxtime = timeRange.maxtime;
+		const mintime = new Date(
+			new Date(maxtime).getTime() - R2_STORAGE_LOOKBACK_MS,
+		).toISOString();
+
+		const result = await this.gql.query(R2StorageMetricsQuery, {
+			accountID: accountId,
+			mintime,
+			maxtime,
+			limit: this.config.queryLimit,
+		});
+
+		if (result.error) {
+			throw graphQLQueryError("r2-storage", result.error);
+		}
+
+		const objectCountMetric: MetricDefinition = {
+			name: R2_METRICS.STORAGE_OBJECT_COUNT,
+			help: "Number of objects stored in the R2 bucket",
+			type: "gauge",
+			values: [],
+		};
+		const payloadBytesMetric: MetricDefinition = {
+			name: R2_METRICS.STORAGE_PAYLOAD_BYTES,
+			help: "Payload size in bytes stored in the R2 bucket",
+			type: "gauge",
+			values: [],
+		};
+		const metadataBytesMetric: MetricDefinition = {
+			name: R2_METRICS.STORAGE_METADATA_BYTES,
+			help: "Metadata size in bytes stored in the R2 bucket",
+			type: "gauge",
+			values: [],
+		};
+		const pendingMultipartUploadsMetric: MetricDefinition = {
+			name: R2_METRICS.STORAGE_PENDING_MULTIPART_UPLOADS,
+			help: "Number of pending (incomplete) multipart uploads in the R2 bucket",
+			type: "gauge",
+			values: [],
+		};
+
+		// accountTag selects one account. Rows are ordered datetime_DESC, so
+		// the first row seen for a bucket/storage class is its latest value.
+		const groups =
+			result.data?.viewer?.accounts?.[0]?.r2StorageAdaptiveGroups ?? [];
+		if (groups.length >= this.config.queryLimit) {
+			// Expected on larger accounts and harmless: newest rows come first,
+			// so the limit only drops older values. A bucket is lost only if its
+			// latest value is older than the cut-off, and idle buckets still
+			// report at least hourly.
+			this.logger.debug("R2 storage lookback truncated at query limit", {
+				account: normalizedAccount,
+				returned: groups.length,
+				limit: this.config.queryLimit,
+			});
+		}
+
+		const seenBuckets = new Set<string>();
+		for (const group of groups) {
+			const dims = group.dimensions;
+			if (dims == null) continue;
+			const bucketKey = `${dims.bucketName}::${dims.storageClass}`;
+			if (seenBuckets.has(bucketKey)) continue;
+			seenBuckets.add(bucketKey);
+
+			const labels = {
+				account: normalizedAccount,
+				bucket: dims.bucketName,
+				storage_class: dims.storageClass,
+			};
+			objectCountMetric.values.push({
+				labels,
+				value: group.max?.objectCount ?? 0,
+			});
+			payloadBytesMetric.values.push({
+				labels,
+				value: group.max?.payloadSize ?? 0,
+			});
+			metadataBytesMetric.values.push({
+				labels,
+				value: group.max?.metadataSize ?? 0,
+			});
+			pendingMultipartUploadsMetric.values.push({
+				labels,
+				value: group.max?.uploadCount ?? 0,
+			});
+		}
+
+		return [
+			objectCountMetric,
+			payloadBytesMetric,
+			metadataBytesMetric,
+			pendingMultipartUploadsMetric,
+		].filter((m) => m.values.length > 0);
 	}
 
 	/**
