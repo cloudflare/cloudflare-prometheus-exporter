@@ -35,7 +35,7 @@ EXPOSE 8787
 RUN printf '#!/bin/sh\n\
     # Generate .dev.vars from environment variables\n\
     : > .dev.vars\n\
-    env | grep -E "^(CLOUDFLARE_|CF_)" | while read -r line; do\n\
+    env | while read -r line; do\n\
     echo "$line" >> .dev.vars\n\
     done\n\
     exec wrangler dev --local --ip 0.0.0.0 "$@"\n' > /app/entrypoint.sh \
