@@ -17,6 +17,8 @@ export const MetricQueryNameSchema = z.enum([
 	"stream-live-inputs",
 	"images",
 	"turnstile",
+	"r2-operations",
+	"r2-storage",
 	// Zone-level
 	"http-metrics",
 	"adaptive-metrics",
@@ -55,6 +57,8 @@ export const ACCOUNT_LEVEL_QUERIES = [
 	"stream-live-inputs",
 	"images",
 	"turnstile",
+	"r2-operations",
+	"r2-storage",
 ] as const;
 
 /**
@@ -110,7 +114,8 @@ export function isZoneLevelQuery(query: string): query is ZoneLevelQuery {
 /**
  * Query types available on free tier accounts.
  * Note: Stream queries (stream-video-playback, stream-live-inputs) are
- * intentionally excluded — Cloudflare Stream is a paid product.
+ * intentionally excluded — Cloudflare Stream is a paid product. R2 is
+ * usage-billed with a free allowance and is available on Free plan accounts.
  */
 export const FREE_TIER_QUERIES = [
 	"worker-totals",
@@ -121,6 +126,8 @@ export const FREE_TIER_QUERIES = [
 	"magic-firewall-samples",
 	"network-analytics",
 	"turnstile",
+	"r2-operations",
+	"r2-storage",
 ] as const;
 
 /**

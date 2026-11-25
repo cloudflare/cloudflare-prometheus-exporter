@@ -8,7 +8,7 @@ Export Cloudflare metrics to Prometheus. Built on Cloudflare Workers with Durabl
 
 ## Features
 
-- **90+ Prometheus metrics** - requests, bandwidth, threats, workers, load balancers, SSL certs, hostname-level analytics, network analytics, Magic Transit tunnel health/traffic/SLO, Magic Firewall per-rule visibility, Turnstile events, stream video/live, and more
+- **90+ Prometheus metrics** - requests, bandwidth, threats, workers, load balancers, SSL certs, hostname-level analytics, network analytics, Magic Transit tunnel health/traffic/SLO, Magic Firewall per-rule visibility, Turnstile events, stream video/live, R2 operations/storage, and more
 - **Cloudflare Workers** - serverless edge deployment
 - **Durable Objects** - stateful counter accumulation for proper Prometheus semantics
 - **Background refresh** - alarms fetch data every 60s; scrapes return cached data instantly
@@ -470,6 +470,32 @@ Traffic volume metrics across Cloudflare's Network Analytics v2 datasets. All ar
 | `cloudflare_stream_live_input_gop_duration_seconds` | gauge | account, event_code |
 | `cloudflare_stream_live_input_upload_duration_ratio` | gauge | account, event_code |
 
+### R2 Metrics
+
+**Operations** (from `r2-operations` query)
+
+| Metric | Type | Labels |
+|--------|------|--------|
+| `cloudflare_r2_operations_requests_total` | counter | account, bucket, operation, status, storage_class |
+| `cloudflare_r2_operations_response_bytes_total` | counter | account, bucket, operation, storage_class |
+| `cloudflare_r2_operations_response_object_size_bytes_total` | counter | account, bucket, operation, storage_class |
+| `cloudflare_r2_operations_errors_total` | counter | account, bucket, operation, response_status_code |
+
+**Storage** (from `r2-storage` query)
+
+| Metric | Type | Labels |
+|--------|------|--------|
+| `cloudflare_r2_storage_object_count` | gauge | account, bucket, storage_class |
+| `cloudflare_r2_storage_payload_bytes` | gauge | account, bucket, storage_class |
+| `cloudflare_r2_storage_metadata_bytes` | gauge | account, bucket, storage_class |
+| `cloudflare_r2_storage_pending_multipart_uploads` | gauge | account, bucket, storage_class |
+
+`status` on `cloudflare_r2_operations_requests_total` is R2's action status (for example `success`, `userError`, `internalError`). Errors are also broken down by HTTP status code (400 and above) in `cloudflare_r2_operations_errors_total`.
+
+R2 reports storage values periodically rather than per minute (about every 10 minutes for buckets that are changing, at least hourly for idle ones), so storage gauges show the most recent value reported within a 24-hour lookback. A deleted bucket can keep its last values for up to 24 hours. On accounts with many buckets the storage query can reach `QUERY_LIMIT`; results are newest-first, so only older values are dropped.
+
+Buckets with a [jurisdiction](https://developers.cloudflare.com/r2/reference/data-location/#jurisdictional-restrictions) appear with the jurisdiction prefix in the `bucket` label, for example `eu_my-bucket`.
+
 ### Hostname Metrics
 
 Requires `HOST_METRICS_ALLOWLIST` to be set (max 50 hostnames). Disabled when `EXCLUDE_HOST=true`.
@@ -582,15 +608,15 @@ For mixed accounts (enterprise + free zones), only free zones are skipped—paid
 │   ▼            ▼      ▼            ▼      ▼            ▼                       │
 │ ┌─────┐    ┌─────┐  ┌─────┐    ┌─────┐  ┌─────┐    ┌─────┐                     │
 │ │Exprt│    │Exprt│  │Exprt│    │Exprt│  │Exprt│    │Exprt│                     │
-│ │(23) │ .. │(N)  │  │(23) │ .. │(N)  │  │(23) │ .. │(N)  │                     │
+│ │(25) │ .. │(N)  │  │(25) │ .. │(N)  │  │(25) │ .. │(N)  │                     │
 │ │acct │    │zone │  │acct │    │zone │  │acct │    │zone │                     │
 │ └─────┘    └─────┘  └─────┘    └─────┘  └─────┘    └─────┘                     │
 │                                                                                │
 │  MetricExporter DOs (per account):                                             │
-│  - Account-scoped (23): worker-totals, logpush-account, magic-transit,         │
+│  - Account-scoped (25): worker-totals, logpush-account, magic-transit,         │
 │    magic-transit-slo, magic-transit-traffic, magic-firewall-samples,           │
 │    network-analytics, stream-video-playback, stream-live-inputs,              │
-│    images, turnstile,                                                        │
+│    images, turnstile, r2-operations, r2-storage,                               │
 │    http-metrics, adaptive-metrics, edge-country-metrics,                      │
 │    colo-metrics, colo-error-metrics, request-method-metrics,                   │
 │    health-check-metrics, load-balancer-metrics, logpush-zone,                  │
@@ -703,7 +729,7 @@ For mixed accounts (enterprise + free zones), only free zones are skipped—paid
 │                                                                        │
 │  3. Push context to MetricExporter DOs:                                │
 │     ┌────────────────────────────────────────────────────────────────┐ │
-│     │ Account-scoped (23 exporters):                                 │ │
+│     │ Account-scoped (25 exporters):                                 │ │
 │     │   exporter.updateZoneContext(accountId, accountName, zones)    │ │
 │     │                                                                │ │
 │     │ Zone-scoped (N exporters, 1 per zone):                         │ │
@@ -720,8 +746,8 @@ For mixed accounts (enterprise + free zones), only free zones are skipped—paid
 ┌────────────────────────────────────────────────────────────────────────┐
 │           MetricExporter.refresh() for account-scoped queries          │
 │                                                                        │
-│  Query Types (23 total):                                               │
-│  ├── ACCOUNT-LEVEL (single account per query, 11):                     │
+│  Query Types (25 total):                                               │
+│  ├── ACCOUNT-LEVEL (single account per query, 13):                     │
 │  │   ├── worker-totals                                                 │
 │  │   ├── logpush-account                                               │
 │  │   ├── magic-transit                                                 │
@@ -732,7 +758,9 @@ For mixed accounts (enterprise + free zones), only free zones are skipped—paid
 │  │   ├── stream-video-playback                                         │
 │  │   ├── stream-live-inputs                                            │
 │  │   ├── images (REST)                                                 │
-│  │   └── turnstile                                                     │
+│  │   ├── turnstile                                                     │
+│  │   ├── r2-operations                                                 │
+│  │   └── r2-storage                                                    │
 │  │                                                                     │
 │  └── ZONE-LEVEL (all zones batched in one query, 12):                  │
 │      ├── http-metrics                                                  │
